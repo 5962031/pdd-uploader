@@ -187,6 +187,19 @@ Playwright 传给回调的是 `URL` 对象而非字符串，`.includes()` 返回
 - 每行打印 款式/容量/图片名
 - 输出 mix/red/blue 对应的行号
 
+### 2026-06-05: 控件扫描增强 + 蓝色行补传 (#11)
+
+**属性修复**: 
+- `scanAllControls()` 扩展为扫描 div/span/button 中含 "请选择" 或 beast/select class 的元素
+- 匹配规则放宽：y 差 < 120px，x 差 > -100
+- 用 `page.mouse.click(cx, cy)` 坐标点击替代 locator.click()
+- 打印全部控件 tag/class/placeholder/坐标
+
+**SKU修复**: 
+- `styleFirstRow` 精确记录每个款式首次出现行号
+- `scrollIntoViewIfNeeded()` + explicit upload per style first occurrence
+- 输出 `Styles uploaded: mix, red, blue` 确认全部三种图已上传
+
 ## 下一步：label_001 端到端测试
 
 ### 测试步骤
