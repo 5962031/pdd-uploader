@@ -102,22 +102,28 @@ async function fillSkuTable(page, product) {
 
   // ---- 填价格 ----
   const rows = page.locator('tr');
-  const totalRows = await rows.count();
   let skuIdx = 0, filledPrices = 0;
-  for (let i = 0; i < totalRows; i++) {
-    const row = rows.nth(i);
-    const text = await row.innerText();
-    if (!text.includes('已启用')) continue;
-    if (skuIdx >= skuRows.length) break;
-    const t = skuRows[skuIdx];
-    const inputs = row.locator('input[placeholder="请输入"]');
-    const ic = await inputs.count();
-    if (ic >= 2) {
-      const v0 = await inputs.nth(0).inputValue();
-      if (v0 === '' || v0 === '0' || v0 === '请输入') await fillRowValues(page, row, t.stock, t.groupPrice, t.singlePrice);
-      filledPrices++;
+  // 不缓存行数（虚拟滚动）
+  for (let pass = 0; pass < 5 && skuIdx < skuRows.length; pass++) {
+    const curTotal = await rows.count();
+    for (let i = 0; i < curTotal && skuIdx < skuRows.length; i++) {
+      const row = rows.nth(i);
+      const text = await row.innerText();
+      if (!text.includes('已启用')) continue;
+      const t = skuRows[skuIdx];
+      const inputs = row.locator('input[placeholder="请输入"]');
+      const ic = await inputs.count();
+      if (ic >= 2) {
+        const v0 = await inputs.nth(0).inputValue();
+        if (v0 === '' || v0 === '0' || v0 === '请输入') await fillRowValues(page, row, t.stock, t.groupPrice, t.singlePrice);
+        filledPrices++;
+      }
+      skuIdx++;
     }
-    skuIdx++;
+    if (skuIdx < skuRows.length) {
+      await page.evaluate(() => { const t = document.querySelector('table'); if (t) t.scrollTop = t.scrollHeight; });
+      await page.waitForTimeout(800);
+    }
   }
   logger.info(`Prices: ${filledPrices}/${skuRows.length}`);
 
@@ -125,71 +131,80 @@ async function fillSkuTable(page, product) {
   let previewsOk = 0;
   skuIdx = 0;
 
-  for (let i = 0; i < totalRows; i++) {
-    const row = rows.nth(i);
-    const text = await row.innerText();
-    if (!text.includes('已启用')) continue;
-    if (skuIdx >= skuRows.length) {
-      // 滚动表格到底部加载更多行
-      await page.evaluate(() => { const t = document.querySelector('table'); if (t) { t.scrollTop = t.scrollHeight; } });
-      await page.waitForTimeout(800);
-    }
-    if (skuIdx >= skuRows.length) break;
+  // 不缓存 totalRows —— 每次循环重新计算（虚拟滚动表格会动态加载行）
+  for (let pass = 0; pass < 5 && skuIdx < skuRows.length; pass++) {
+    const curTotal = await rows.count();
+    let progressed = false;
 
-    const target = skuRows[skuIdx];
-    const fn = path.basename(target.previewImage || '');
-    const cap = target.specs[1];
-    const style = target.specs[0];
+    for (let i = 0; i < curTotal && skuIdx < skuRows.length; i++) {
+      const row = rows.nth(i);
+      const text = await row.innerText();
+      if (!text.includes('已启用')) continue;
 
-    // 强制滚动到当前行
-    try {
-      await row.scrollIntoViewIfNeeded();
-      await page.waitForTimeout(200);
-    } catch {}
+      // 跳过已经处理过的行
+      if (skuIdx >= skuRows.length) break;
 
-    // 打印行信息
-    logger.info(`  Row${skuIdx + 1}: ${style} / ${cap} | img=${fn}`);
+      const target = skuRows[skuIdx];
+      const fn = path.basename(target.previewImage || '');
+      const cap = target.specs[1];
+      const style = target.specs[0];
 
-    if (target.previewImage && fs.existsSync(target.previewImage)) {
-      // 强制上传（不管是否已有图）
-      const ok = await uploadToRow(page, row, target.previewImage);
-      if (ok) {
-        previewsOk++;
-        logger.info(`    → ${fn} uploaded ✓`);
-      } else {
-        // 回退：点击行内上传图标 + filechooser
-        logger.warn(`    direct upload failed, trying filechooser...`);
-        try {
-          const uploadTrigger = row.locator('text=上传, text=本地上传').first();
-          if (await uploadTrigger.count() > 0) {
-            const [fc] = await Promise.all([
-              page.waitForEvent('filechooser', { timeout: 5000 }),
-              uploadTrigger.click(),
-            ]);
-            await fc.setFiles(target.previewImage);
-            await page.waitForTimeout(400);
-            previewsOk++;
-            logger.info(`    → ${fn} uploaded via filechooser ✓`);
-          } else {
-            // 打印该行 HTML 帮助排查
-            const html = await row.innerHTML();
-            logger.warn(`    ✗ no upload trigger found. Row HTML (first 300 chars): ${html.substring(0, 300)}`);
-            await takeScreenshot(page, `09_sku_fail_row${skuIdx + 1}`);
+      // 强制滚动到当前行
+      try { await row.scrollIntoViewIfNeeded(); await page.waitForTimeout(200); } catch {}
+
+      logger.info(`  Row${skuIdx + 1}: ${style} / ${cap} | img=${fn}`);
+
+      if (target.previewImage && fs.existsSync(target.previewImage)) {
+        const ok = await uploadToRow(page, row, target.previewImage);
+        if (ok) {
+          previewsOk++; progressed = true;
+          logger.info(`    → ${fn} uploaded ✓`);
+        } else {
+          // filechooser 回退
+          logger.warn(`    direct upload failed, trying filechooser...`);
+          try {
+            const uploadTrigger = row.locator('text=上传, text=本地上传').first();
+            if (await uploadTrigger.count() > 0) {
+              const [fc] = await Promise.all([
+                page.waitForEvent('filechooser', { timeout: 5000 }),
+                uploadTrigger.click(),
+              ]);
+              await fc.setFiles(target.previewImage);
+              await page.waitForTimeout(400);
+              previewsOk++; progressed = true;
+              logger.info(`    → ${fn} uploaded via filechooser ✓`);
+            } else {
+              const html = await row.innerHTML();
+              logger.warn(`    ✗ no upload trigger. Row HTML (first 300): ${html.substring(0, 300)}`);
+              await takeScreenshot(page, `09_fail_row${skuIdx + 1}`);
+            }
+          } catch (e2) {
+            logger.warn(`    ✗ filechooser also failed: ${e2.message}`);
+            await takeScreenshot(page, `09_fail_row${skuIdx + 1}`);
           }
-        } catch (e2) {
-          logger.warn(`    ✗ filechooser also failed: ${e2.message}`);
-          await takeScreenshot(page, `09_sku_fail_row${skuIdx + 1}`);
         }
+      } else {
+        logger.warn(`    ✗ image missing: ${target.previewImage || '(none)'}`);
       }
-    } else {
-      logger.warn(`    ✗ image missing: ${target.previewImage || '(none)'}`);
+
+      skuIdx++;
+
+      if (skuIdx === 3 || skuIdx === 6 || skuIdx === 9) {
+        await takeScreenshot(page, `09_sku_preview_row${skuIdx}`);
+      }
     }
 
-    skuIdx++;
-
-    if (skuIdx === 3 || skuIdx === 6 || skuIdx === 9) {
-      await takeScreenshot(page, `09_sku_preview_row${skuIdx}`);
+    // 如果还有剩余行没处理，滚动表格到底部并重新计数
+    if (skuIdx < skuRows.length) {
+      logger.info(`  Still ${skuRows.length - skuIdx} rows remaining, scrolling table to bottom...`);
+      await page.evaluate(() => {
+        const t = document.querySelector('table');
+        if (t) { t.scrollTop = t.scrollHeight; }
+      });
+      await page.waitForTimeout(1000);
     }
+
+    if (!progressed) break; // 卡住了，退出
   }
 
   await takeScreenshot(page, '09_sku_table_done');
