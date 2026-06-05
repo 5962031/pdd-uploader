@@ -46,6 +46,24 @@ require('dotenv').config({ path: '.env.local' });
 | 安全审计 + .gitignore | ✅ |
 | 运行手册（docs/RUNBOOK.md） | ✅ |
 
+## 最近修复
+
+### 2026-06-05: 登录等待 bug (#1)
+
+**问题**: `npm run run:label` 运行时 CDP 连接成功，但登录步骤瞬间失败报 `Login timeout`。
+
+**根因**: `src/browser/session.js` 中 `waitForLogin()` 使用了：
+```js
+page.waitForURL(url => !url.includes('/login'))
+```
+Playwright 传给回调的是 `URL` 对象而非字符串，`.includes()` 返回了异常，catch 块又吞掉了真实错误。
+
+**修复**:
+- 改用 `page.waitForFunction(() => !window.location.href.includes('/login'))` —— 在浏览器上下文直接判断 `location.href`，不依赖 Playwright 传参类型
+- catch 块打印真实错误类型、消息、当前 URL
+- 增加二次检查（race condition 兜底）
+- 轮询间隔设为 2 秒（减少 CPU 占用）
+
 ## 下一步：label_001 端到端测试
 
 ### 测试步骤

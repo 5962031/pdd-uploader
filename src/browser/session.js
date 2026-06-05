@@ -87,38 +87,75 @@ async function saveSession(context) {
  */
 async function waitForLogin(page) {
   logger.step('Navigating to PDD MMS login page...');
-  await page.goto(config.urls.mmsLogin, { waitUntil: 'domcontentloaded', timeout: 15000 });
+
+  try {
+    await page.goto(config.urls.mmsLogin, { waitUntil: 'domcontentloaded', timeout: 15000 });
+  } catch (navErr) {
+    logger.error(`Failed to navigate to login page: ${navErr.message}`);
+    throw new Error(`Cannot reach MMS login page: ${navErr.message}`);
+  }
+
   await page.waitForTimeout(2000);
 
   await takeScreenshot(page, '01_login_page');
 
-  // 检测是否已经在首页（已登录）
-  if (!page.url().includes('/login')) {
-    logger.info('Already logged in (redirected to home)');
+  // 检测是否已经登录（已重定向到首页）
+  const currentUrl = page.url();
+  logger.info(`Current URL: ${currentUrl}`);
+  if (!currentUrl.includes('/login')) {
+    logger.info('Already logged in (redirected to home, no login needed)');
+    await takeScreenshot(page, '02_already_logged_in');
     return;
   }
 
-  // 等待用户登录 —— 尝试检测 "账号登录" 标签
+  // 检测 "账号登录" 标签
   const accountLoginTab = page.locator('text=账号登录');
   if (await accountLoginTab.count() > 0) {
-    logger.info('Account login tab available');
+    logger.info('Account login tab available — you can also use password login');
   }
 
   logger.info('========================================');
   logger.info('Please log in manually (scan QR or use account login)');
-  logger.info('Waiting for login to complete...');
+  logger.info(`Waiting up to ${config.timeouts.login / 1000}s for login...`);
   logger.info('========================================');
 
-  // 轮询等待登录成功（最多2分钟）
+  // 使用 waitForFunction 判断 URL 变化（避免 waitForURL 的 URL 对象类型问题）
+  const timeoutMs = config.timeouts.login;
+  const startTime = Date.now();
+
   try {
-    await page.waitForURL(
-      url => !url.includes('/login'),
-      { timeout: config.timeouts.login }
+    await page.waitForFunction(
+      // 在浏览器上下文执行，直接读 location.href
+      () => !window.location.href.includes('/login'),
+      { timeout: timeoutMs, polling: 2000 }  // 每2秒检查一次
     );
-    logger.info('Login detected!');
+
+    const elapsed = ((Date.now() - startTime) / 1000).toFixed(0);
+    logger.info(`Login detected after ${elapsed}s!`);
+    await page.waitForTimeout(1000);  // 等页面稳定
     await takeScreenshot(page, '02_login_success');
-  } catch {
-    throw new Error(`Login timeout after ${config.timeouts.login / 1000}s. Please try again.`);
+  } catch (waitErr) {
+    // 打印真实错误
+    const elapsed = ((Date.now() - startTime) / 1000).toFixed(0);
+    logger.error(`Login wait failed after ${elapsed}s`);
+    logger.error(`  Error type: ${waitErr.constructor.name}`);
+    logger.error(`  Error message: ${waitErr.message}`);
+
+    // 再检查一次 —— 也许已经登录了但 URL 变了
+    const finalUrl = page.url();
+    logger.info(`  Final URL: ${finalUrl}`);
+    if (!finalUrl.includes('/login')) {
+      logger.info('Actually logged in! (race condition)');
+      await takeScreenshot(page, '02_login_success');
+      return;
+    }
+
+    throw new Error(
+      `Login timeout after ${config.timeouts.login / 1000}s.\n` +
+      `  Current URL: ${finalUrl}\n` +
+      `  Error: ${waitErr.message}\n` +
+      `  Make sure you completed the login (scan QR or enter credentials) in the Chrome window.`
+    );
   }
 }
 
