@@ -89,7 +89,7 @@ async function processOneProduct(page, product, args) {
   const categoryPath = resolveCategoryPath(product);
 
   // ---- 选择类目 ----
-  await selectCategory(page, categoryPath);
+  await selectCategory(page.context(), page, categoryPath);
 
   // ---- 填写基本信息 ----
   await fillBasicInfo(page, product);

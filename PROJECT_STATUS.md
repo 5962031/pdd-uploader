@@ -93,6 +93,19 @@ Playwright 传给回调的是 `URL` 对象而非字符串，`.includes()` 返回
 4. 新增 `readSelectedCategory()` — 点击完类目后读取页面"已选分类"文本
 5. 最终校验：只有已选分类包含目标叶子名称时才点确认，否则进入 `manualAssist()`
 
+### 2026-06-05: 分类页页面锁定 + manual assist 误读 goods_list (#4)
+
+**问题**: manual assist 后脚本仍操作 `goods_list` 页面而非 `/goods/category`。"发布新商品" 在新标签页打开分类页，但 page 引用未切换。
+
+**修复**:
+1. `selectCategory()` 签名改为 `(context, page, categoryPath)`，传入 context 以查找页面
+2. `ensureCategoryPage()` — 在 `context.pages()` 中查找 `/goods/category` 并 `bringToFront()`
+3. `readSelectedCategory()` — 改用 `document.body.innerText` 匹配，不依赖 CSS selector
+4. 类目校验用 `body.innerText.includes(expectedLeaf)` 宽松匹配
+5. `findConfirmButton()` — `getByText(ct, { exact: true })` 精确匹配，扫描 span/div 非 button 元素
+6. `manualAssist()` — `bringToFront()` → 读 body → 验证 → 点确认
+7. `index.js` 调用处改为 `selectCategory(page.context(), page, categoryPath)`
+
 ## 下一步：label_001 端到端测试
 
 ### 测试步骤
