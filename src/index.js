@@ -1,0 +1,230 @@
+/**
+ * pdd-uploader 主入口
+ *
+ * 用法:
+ *   node src/index.js                        # 默认：第一个商品，填完停住
+ *   node src/index.js --publish              # 填完后自动发布
+ *   node src/index.js --product=label_001     # 指定商品ID
+ *   node src/index.js --batch                 # 批量模式：逐个处理Excel全部商品
+ *   node src/index.js --verbose               # 详细日志
+ *   node src/index.js --dry-run               # 干跑：只校验不填表
+ */
+const readline = require('readline');
+const config = require('./config');
+const logger = require('./helpers/logger');
+const { takeScreenshot } = require('./helpers/screenshot');
+const { launchBrowser } = require('./browser/launcher');
+const { restoreSession, saveSession, waitForLogin } = require('./browser/session');
+const { readProducts } = require('./data/excel-reader');
+const { mapProduct } = require('./data/product-mapper');
+const { validateProduct } = require('./data/validator');
+const { resolveCategoryPath } = require('./data/category-map');
+const { selectCategory } = require('./pages/category-page');
+const { fillBasicInfo } = require('./actions/fill-basic-info');
+const { fillAttributes } = require('./actions/fill-attributes');
+const { fillSpecifications } = require('./actions/fill-specs');
+const { fillSkuTable } = require('./actions/fill-sku-table');
+const { stopBeforePublish } = require('./pages/submit-guard');
+
+/**
+ * 解析命令行参数
+ */
+function parseArgs() {
+  const args = process.argv.slice(2);
+  return {
+    publish: args.includes('--publish'),
+    verbose: args.includes('--verbose'),
+    productId: args.find(a => a.startsWith('--product='))?.split('=')[1] || null,
+    skipLogin: args.includes('--skip-login'),
+    batch: args.includes('--batch'),
+    dryRun: args.includes('--dry-run'),
+  };
+}
+
+/**
+ * 等待用户按回车继续
+ */
+function waitForEnter(prompt) {
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  return new Promise(resolve => {
+    rl.question(prompt || '\n按 Enter 继续下一个，输入 q 退出: ', (answer) => {
+      rl.close();
+      resolve(answer.trim().toLowerCase());
+    });
+  });
+}
+
+/**
+ * 处理单个商品
+ */
+async function processOneProduct(page, product, args) {
+  // ---- 校验 ----
+  logger.step(`=== Validating: ${product.productId} ===`);
+  const validation = validateProduct(product);
+
+  if (!validation.valid) {
+    logger.error(`Product "${product.productId}" has ${validation.errors.length} error(s):`);
+    validation.errors.forEach(e => logger.error(`  ❌ [${e.field}] ${e.message}`));
+    if (args.dryRun) return { status: 'validation_failed' };
+
+    logger.error('Cannot proceed with invalid product. Fix Excel data and retry.');
+    return { status: 'validation_failed', errors: validation.errors };
+  }
+
+  if (validation.warnings.length > 0) {
+    logger.warn(`${validation.warnings.length} warning(s) — continuing anyway`);
+  }
+
+  if (args.dryRun) {
+    logger.info(`[DRY RUN] "${product.productId}" validation PASSED — would upload`);
+    return { status: 'dry_run_ok' };
+  }
+
+  // ---- 解析类目 ----
+  logger.step(`=== Category for: ${product.productId} ===`);
+  const categoryPath = resolveCategoryPath(product);
+
+  // ---- 选择类目 ----
+  await selectCategory(page, categoryPath);
+
+  // ---- 填写基本信息 ----
+  await fillBasicInfo(page, product);
+
+  // ---- 填写属性 ----
+  await fillAttributes(page, product);
+
+  // ---- 设置规格 ----
+  await fillSpecifications(page, product);
+
+  // ---- 填写 SKU 价格表 ----
+  await fillSkuTable(page, product);
+
+  // ---- 停止在发布之前 ----
+  const result = await stopBeforePublish(page, args.publish);
+
+  return result;
+}
+
+/**
+ * 批量模式：逐个处理Excel中所有商品
+ */
+async function batchMode(page, rawProducts, args) {
+  logger.info(`\n=== BATCH MODE: ${rawProducts.length} products ===\n`);
+
+  const results = [];
+
+  for (let i = 0; i < rawProducts.length; i++) {
+    const raw = rawProducts[i];
+    const product = mapProduct(raw);
+
+    logger.info(`\n${'═'.repeat(50)}`);
+    logger.info(`Product ${i + 1}/${rawProducts.length}: ${product.productId}`);
+    logger.info(`Title: ${product.title.substring(0, 50)}...`);
+    logger.info(`${'═'.repeat(50)}`);
+
+    // 处理
+    const result = await processOneProduct(page, product, args);
+    results.push({ productId: product.productId, ...result });
+
+    // 最后一个不等待
+    if (i < rawProducts.length - 1) {
+      const answer = await waitForEnter(`\n✅ ${product.productId} 完成 (${result.status})。`);
+      if (answer === 'q') {
+        logger.info('User quit batch mode');
+        break;
+      }
+    }
+  }
+
+  // 汇总
+  logger.info(`\n=== BATCH SUMMARY ===`);
+  results.forEach(r => {
+    const icon = r.status === 'filled_not_published' ? '✅' :
+                 r.status === 'published' ? '🚀' :
+                 r.status === 'validation_failed' ? '❌' : '⚠️';
+    logger.info(`  ${icon} ${r.productId}: ${r.status}`);
+  });
+
+  return results;
+}
+
+/**
+ * 主流程
+ */
+async function main() {
+  const args = parseArgs();
+
+  logger.info('╔══════════════════════════════════════╗');
+  logger.info('║     PDD Uploader v1.1.0             ║');
+  logger.info('║  拼多多商家后台商品发布自动化        ║');
+  logger.info('╚══════════════════════════════════════╝');
+
+  // ---- Step 1: 读取商品数据 ----
+  logger.step('=== Step 1: Reading Excel ===');
+  const rawProducts = readProducts(config.paths.excel);
+
+  if (rawProducts.length === 0) {
+    throw new Error(`No products found in ${config.paths.excel}`);
+  }
+
+  logger.info(`Found ${rawProducts.length} product(s) in Excel`);
+
+  // ---- Dry-run 模式：只校验，不打开浏览器 ----
+  if (args.dryRun) {
+    logger.info('\n=== DRY RUN MODE ===');
+    rawProducts.forEach((raw, i) => {
+      const product = mapProduct(raw);
+      const v = validateProduct(product);
+      const icon = v.valid ? '✅' : '❌';
+      logger.info(`${icon} [${i + 1}] ${product.productId}: ${product.title.substring(0, 40)}`);
+      v.errors.forEach(e => logger.error(`    ❌ ${e.field}: ${e.message}`));
+      v.warnings.forEach(w => logger.warn(`    ⚠️ ${w.field}: ${w.message}`));
+    });
+    return;
+  }
+
+  // ---- Step 2: 启动浏览器 ----
+  logger.step('=== Step 2: Launching Browser ===');
+  const { browser, context, page } = await launchBrowser();
+
+  // ---- Step 3: 登录 ----
+  logger.step('=== Step 3: Login ===');
+  const sessionOk = await restoreSession(context, page);
+
+  if (!sessionOk) {
+    await waitForLogin(page);
+    await saveSession(context);
+  }
+
+  // ---- Step 4-9: 处理商品 ----
+  if (args.batch) {
+    await batchMode(page, rawProducts, args);
+  } else {
+    // 单个商品
+    let product;
+    if (args.productId) {
+      const raw = rawProducts.find(r => {
+        const vals = Object.values(r);
+        return vals.some(v => String(v).includes(args.productId));
+      });
+      if (!raw) throw new Error(`Product "${args.productId}" not found in Excel`);
+      product = mapProduct(raw);
+    } else {
+      product = mapProduct(rawProducts[0]);
+      logger.info(`Using first product: ${product.productId}`);
+    }
+
+    await processOneProduct(page, product, args);
+  }
+
+  logger.info('');
+  logger.info('Done! Browser stays open — close it manually when ready.');
+  logger.info(`Screenshots: ${config.paths.screenshots}`);
+}
+
+// 启动
+main().catch(async (err) => {
+  logger.error(`FATAL: ${err.message}`);
+  logger.error(err.stack);
+  process.exit(1);
+});
