@@ -137,6 +137,26 @@ Playwright 传给回调的是 `URL` 对象而非字符串，`.includes()` 返回
 5. JS fallback — fill() 失败后用原生 setter 兜底
 6. 填完后校验：stock/group/single 不为空
 
+### 2026-06-05: 3工作表 Excel 架构重构 (#7)
+
+**改动范围**：`excel-reader.js`、`product-mapper.js`、`fill-attributes.js`、`fill-sku-table.js`、`index.js`
+
+**新 Excel 结构**（3个工作表）：
+
+| 工作表 | 用途 | 格式 |
+|--------|------|------|
+| `products` | 商品基础信息 | 竖排 字段/值 |
+| `attributes` | 商品属性 | product_id / 属性名 / 属性值 |
+| `sku` | SKU价格库存 | product_id / 规格列 / 库存 / 拼单价 / 单买价 / 规格编码 / SKU预览图 |
+
+**关键变更**：
+- 属性不再硬编码 → 从 `attributes` 工作表逐项读取填写
+- SKU 价格不再统一填 → 每行独立 库存/拼单价/单买价/预览图
+- `readWorkbook()` 替代 `readProducts()`，返回 `{ products, attributes, sku }`
+- `mapProduct()` 接收3参数：`(productRow, attrSheet, skuSheet)`
+- `extractDimensions()` 自动从 sku 工作表提取规格维度（款式/容量等）
+- `batchMode()` 传递 `workbook` 对象
+
 ## 下一步：label_001 端到端测试
 
 ### 测试步骤

@@ -19,7 +19,7 @@ const logger = require('./helpers/logger');
 const { takeScreenshot } = require('./helpers/screenshot');
 const { launchBrowser } = require('./browser/launcher');
 const { restoreSession, saveSession, waitForLogin } = require('./browser/session');
-const { readProducts } = require('./data/excel-reader');
+const { readWorkbook } = require('./data/excel-reader');
 const { mapProduct } = require('./data/product-mapper');
 const { validateProduct } = require('./data/validator');
 const { resolveCategoryPath } = require('./data/category-map');
@@ -112,17 +112,17 @@ async function processOneProduct(page, product, args) {
 /**
  * 批量模式：逐个处理Excel中所有商品
  */
-async function batchMode(page, rawProducts, args) {
-  logger.info(`\n=== BATCH MODE: ${rawProducts.length} products ===\n`);
+async function batchMode(page, products, workbook, args) {
+  logger.info(`\n=== BATCH MODE: ${products.length} products ===\n`);
 
   const results = [];
 
-  for (let i = 0; i < rawProducts.length; i++) {
-    const raw = rawProducts[i];
-    const product = mapProduct(raw);
+  for (let i = 0; i < products.length; i++) {
+    const raw = products[i];
+    const product = mapProduct(raw, workbook.attributes, workbook.sku);
 
     logger.info(`\n${'═'.repeat(50)}`);
-    logger.info(`Product ${i + 1}/${rawProducts.length}: ${product.productId}`);
+    logger.info(`Product ${i + 1}/${products.length}: ${product.productId}`);
     logger.info(`Title: ${product.title.substring(0, 50)}...`);
     logger.info(`${'═'.repeat(50)}`);
 
@@ -131,7 +131,7 @@ async function batchMode(page, rawProducts, args) {
     results.push({ productId: product.productId, ...result });
 
     // 最后一个不等待
-    if (i < rawProducts.length - 1) {
+    if (i < products.length - 1) {
       const answer = await waitForEnter(`\n✅ ${product.productId} 完成 (${result.status})。`);
       if (answer === 'q') {
         logger.info('User quit batch mode');
@@ -165,22 +165,22 @@ async function main() {
 
   // ---- Step 1: 读取商品数据 ----
   logger.step('=== Step 1: Reading Excel ===');
-  const rawProducts = readProducts(config.paths.excel);
+  const workbook = readWorkbook(config.paths.excel);
 
-  if (rawProducts.length === 0) {
+  if (workbook.products.length === 0) {
     throw new Error(`No products found in ${config.paths.excel}`);
   }
 
-  logger.info(`Found ${rawProducts.length} product(s) in Excel`);
+  logger.info(`Found ${workbook.products.length} product(s), ${workbook.attributes.length} attribute(s), ${workbook.sku.length} SKU row(s)`);
 
   // ---- Dry-run 模式：只校验，不打开浏览器 ----
   if (args.dryRun) {
     logger.info('\n=== DRY RUN MODE ===');
-    rawProducts.forEach((raw, i) => {
-      const product = mapProduct(raw);
+    workbook.products.forEach((raw, i) => {
+      const product = mapProduct(raw, workbook.attributes, workbook.sku);
       const v = validateProduct(product);
       const icon = v.valid ? '✅' : '❌';
-      logger.info(`${icon} [${i + 1}] ${product.productId}: ${product.title.substring(0, 40)}`);
+      logger.info(`${icon} [${i + 1}] ${product.productId}: ${product.title.substring(0, 40)} | ${product.skuRows.length} SKUs | ${product.attributes.length} attrs`);
       v.errors.forEach(e => logger.error(`    ❌ ${e.field}: ${e.message}`));
       v.warnings.forEach(w => logger.warn(`    ⚠️ ${w.field}: ${w.message}`));
     });
@@ -202,19 +202,19 @@ async function main() {
 
   // ---- Step 4-9: 处理商品 ----
   if (args.batch) {
-    await batchMode(page, rawProducts, args);
+    await batchMode(page, workbook.products, workbook, args);
   } else {
     // 单个商品
     let product;
     if (args.productId) {
-      const raw = rawProducts.find(r => {
+      const raw = workbook.products.find(r => {
         const vals = Object.values(r);
         return vals.some(v => String(v).includes(args.productId));
       });
       if (!raw) throw new Error(`Product "${args.productId}" not found in Excel`);
-      product = mapProduct(raw);
+      product = mapProduct(raw, workbook.attributes, workbook.sku);
     } else {
-      product = mapProduct(rawProducts[0]);
+      product = mapProduct(workbook.products[0], workbook.attributes, workbook.sku);
       logger.info(`Using first product: ${product.productId}`);
     }
 
