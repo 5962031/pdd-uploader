@@ -106,6 +106,18 @@ Playwright 传给回调的是 `URL` 对象而非字符串，`.includes()` 返回
 6. `manualAssist()` — `bringToFront()` → 读 body → 验证 → 点确认
 7. `index.js` 调用处改为 `selectCategory(page.context(), page, categoryPath)`
 
+### 2026-06-05: 最近使用分类误判为已选 (#5)
+
+**问题**: `readCategoryState()` 用 `body.innerText` 全页面匹配，把顶部"最近使用的分类：… > 不干胶标签"误判为底部"已选分类"。实际类目树未被点击。
+
+**修复**:
+1. 废弃 `readSelectedCategory()`，新增 `readCategoryState()` — 分别返回 `recentPath` 和 `selectedPath`
+2. `selectedPath` 只从页面底部 "已选分类" 标签后面提取
+3. `recentPath` 仅日志参考，**不作为已选依据**
+4. 新增 `isCategoryCorrect()` 只检查底部 `selectedPath`
+5. 逐级点击后重新用 `readCategoryState()` 验证
+6. manual assist 后同样重新读取底部已选分类
+
 ## 下一步：label_001 端到端测试
 
 ### 测试步骤

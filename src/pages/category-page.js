@@ -113,52 +113,72 @@ async function debugPageState(page, label) {
 }
 
 /**
- * 从 body.innerText 读取已选分类
+ * 精确读取页面底部 "已选分类" 区域（排除"最近使用的分类"干扰）
+ * 返回 { selectedPath: string, recentPath: string }
  */
-async function readSelectedCategory(page) {
+async function readCategoryState(page) {
   try {
-    const text = await page.evaluate(() => {
+    const result = await page.evaluate(() => {
       const body = document.body.innerText;
       const lines = body.split('\n');
 
-      // 方式 1: 找 "已选分类" 标签
+      let recentPath = '';
+      let selectedPath = '';
+
+      // 找 "最近使用的分类" 下面的路径
       for (let i = 0; i < lines.length; i++) {
-        if (lines[i].includes('已选分类') || lines[i].includes('已选择')) {
-          // 取当前行和下面几行
-          const chunk = lines.slice(i, i + 10).join(' > ');
-          return chunk.substring(0, 200);
+        if (lines[i].includes('最近使用的分类')) {
+          // 下一行通常就是类目路径（含 > 符号）
+          for (let j = i + 1; j < Math.min(i + 3, lines.length); j++) {
+            if (lines[j].includes('>')) {
+              recentPath = lines[j].trim();
+              break;
+            }
+          }
+          break;
         }
       }
 
-      // 方式 2: 找含 > 的类目路径
-      for (const line of lines) {
-        if (line.includes('>') && /文具|数码|家居|服饰|母婴|食品/.test(line) && line.length < 150) {
-          return line.trim();
+      // 找 "已选分类" 后面的路径（在页面底部）
+      for (let i = lines.length - 1; i >= 0; i--) {
+        if (lines[i].includes('已选分类')) {
+          // "已选分类" 标签和类目路径通常在同一行或下一行
+          const line = lines[i];
+          const after = line.substring(line.indexOf('已选分类') + 4).trim();
+          if (after.includes('>')) {
+            selectedPath = after;
+          } else if (i + 1 < lines.length && lines[i + 1].includes('>')) {
+            selectedPath = lines[i + 1].trim();
+          }
+          break;
         }
       }
 
-      // 方式 3: 在整个 body 中搜索目标关键词
-      const targets = ['纸张本册', '不干胶标签', '贺卡/明信片', '印刷制品'];
-      for (const t of targets) {
-        const idx = body.indexOf(t);
-        if (idx > 0) {
-          return body.substring(Math.max(0, idx - 50), idx + 80).replace(/\n/g, ' > ');
-        }
-      }
-
-      return null;
+      return { recentPath, selectedPath };
     });
 
-    if (text) {
-      logger.info(`  Selected category: "${text}"`);
-    } else {
-      logger.warn('  Could not read selected category from body text');
+    if (result.recentPath) {
+      logger.info(`  Recent category: "${result.recentPath}"`);
     }
-    return text || '';
+    if (result.selectedPath) {
+      logger.info(`  Selected category (bottom): "${result.selectedPath}"`);
+    } else {
+      logger.info('  No "已选分类" found at page bottom — category NOT selected');
+    }
+
+    return result;
   } catch (err) {
-    logger.warn(`  readSelectedCategory error: ${err.message}`);
-    return '';
+    logger.warn(`  readCategoryState error: ${err.message}`);
+    return { recentPath: '', selectedPath: '' };
   }
+}
+
+/**
+ * 检查已选分类是否包含目标叶子类目
+ */
+function isCategoryCorrect(selectedPath, expectedLeaf) {
+  if (!selectedPath) return false;
+  return selectedPath.includes(expectedLeaf);
 }
 
 /**
@@ -259,26 +279,17 @@ async function manualAssist(page, expectedLeaf) {
   await page.waitForTimeout(500);
   await takeScreenshot(page, '03_manual_selection');
 
-  // 重新读已选分类
-  const selected = await readSelectedCategory(page);
+  // 重新读底部"已选分类"
+  const state = await readCategoryState(page);
 
-  // 宽松校验：body 文本里包含目标叶子类目即可
-  const bodyText = await page.evaluate(() => document.body.innerText);
-  const hasExpectedLeaf = bodyText.includes(expectedLeaf);
-  const hasPaper = bodyText.includes('纸张本册');
-  const hasDigital = bodyText.includes('数码电器');
-  const hasStationery = bodyText.includes('文具电教');
+  logger.info(`  Bottom selected: "${state.selectedPath || '(empty)'}"`);
+  logger.info(`  Recent (ignored): "${state.recentPath}"`);
+  logger.info(`  Target leaf: "${expectedLeaf}"`);
 
-  logger.info(`  Body text check:`);
-  logger.info(`    Has "${expectedLeaf}": ${hasExpectedLeaf}`);
-  logger.info(`    Has "纸张本册": ${hasPaper}`);
-  logger.info(`    Has "不干胶标签": ${bodyText.includes('不干胶标签')}`);
-
-  if (hasExpectedLeaf) {
-    logger.info('  Category appears correct ✓');
-  } else {
-    logger.warn(`  Category may be wrong — expected "${expectedLeaf}" not found in page body`);
-    logger.info('  Continuing anyway, please verify in browser...');
+  // 校验
+  if (!isCategoryCorrect(state.selectedPath, expectedLeaf)) {
+    logger.warn(`  Bottom still NOT showing "${expectedLeaf}" — may need to re-select`);
+    logger.info('  Trying confirm anyway (user said it is correct)...');
   }
 
   // 点击确认
@@ -313,87 +324,69 @@ async function selectCategory(context, page, categoryPath) {
   await debugPageState(catPage, 'category_page');
   await takeScreenshot(catPage, '03_category_page');
 
-  // ---- Step 2: 读取初始已选分类 ----
-  const initialSelection = await readSelectedCategory(catPage);
-  const bodyText = await catPage.evaluate(() => document.body.innerText);
+  // ---- Step 2: 读取当前分类状态 ----
+  let state = await readCategoryState(catPage);
 
-  // 如果页面已经包含了目标叶子类目（最近使用或之前手动选过的），直接点确认
-  if (initialSelection.includes(expectedLeaf) || bodyText.includes(expectedLeaf)) {
-    logger.info(`Category already selected: "${expectedLeaf}" ✓`);
-    const ok = await clickConfirmAndWait(catPage);
-    if (ok) {
-      return await waitForFormLoad(catPage);
-    }
-  }
-
-  // ---- Step 3: 尝试最近使用 ----
-  const recentCount = await catPage.locator('text=最近使用').count();
-  if (recentCount > 0) {
-    logger.step('Trying "最近使用"...');
-    // 点击叶子节点
-    for (const text of [expectedLeaf, '不干胶标签', '纸张本册']) {
-      const el = catPage.locator(`text=${text}`).first();
-      if (await el.count() > 0) {
-        try {
-          await el.click({ timeout: 3000 });
-          await catPage.waitForTimeout(800);
-          logger.info(`  Clicked "${text}"`);
-          break;
-        } catch { /* continue */ }
-      }
-    }
-  }
-
-  // ---- Step 4: 逐级点击 ----
-  logger.step('Clicking tree...');
-  for (let i = 0; i < categoryPath.length; i++) {
-    const level = categoryPath[i];
-    logger.info(`  Level ${i + 1}: "${level}"`);
-
-    let clicked = false;
-
-    if (level.includes('/')) {
-      for (const part of level.split('/')) {
-        const trimmed = part.trim();
-        if (await clickByText(catPage, trimmed)) {
-          logger.info(`    ✓ "${trimmed}"`);
-          clicked = true;
-        } else {
-          logger.warn(`    ✗ "${trimmed}"`);
-        }
-      }
-    } else {
-      clicked = await clickByText(catPage, level);
-      if (clicked) logger.info(`    ✓ "${level}"`);
-      else logger.warn(`    ✗ "${level}"`);
-    }
-
-    await takeScreenshot(catPage, `03_level_${i + 1}`);
-    await catPage.waitForTimeout(300);
-  }
-
-  // ---- Step 5: 验证类目 ----
-  const selected = await readSelectedCategory(catPage);
-  const bodyAfter = await catPage.evaluate(() => document.body.innerText);
-  const isCorrect = bodyAfter.includes(expectedLeaf) || selected.includes(expectedLeaf);
-
-  await debugPageState(catPage, 'before_confirm');
-
-  if (isCorrect) {
-    logger.info(`Category verified ✓ → "${selected}"`);
+  // 关键：只有底部"已选分类"区域显示的才算是真的已选
+  // "最近使用的分类"里的不算！
+  if (isCategoryCorrect(state.selectedPath, expectedLeaf)) {
+    logger.info(`Category already selected (bottom): "${state.selectedPath}" ✓`);
     const ok = await clickConfirmAndWait(catPage);
     if (ok) return await waitForFormLoad(catPage);
   }
 
-  // ---- Step 6: 人工辅助 ----
-  logger.warn('Auto-select failed, entering manual assist...');
+  if (state.selectedPath) {
+    logger.info(`Bottom selection is "${state.selectedPath}" — does NOT match "${expectedLeaf}", need to click tree`);
+  }
+
+  // ---- Step 3: 逐级点击类目树 ----
+  logger.step('Clicking tree level by level...');
+  for (let i = 0; i < categoryPath.length; i++) {
+    const level = categoryPath[i];
+    logger.info(`  Level ${i + 1}/4: "${level}"`);
+
+    if (level.includes('/')) {
+      for (const part of level.split('/')) {
+        const trimmed = part.trim();
+        const ok = await clickByText(catPage, trimmed);
+        if (ok) logger.info(`    ✓ "${trimmed}"`);
+        else logger.warn(`    ✗ "${trimmed}"`);
+        await catPage.waitForTimeout(300);
+      }
+    } else {
+      const ok = await clickByText(catPage, level);
+      if (ok) logger.info(`    ✓ "${level}"`);
+      else logger.warn(`    ✗ "${level}"`);
+    }
+
+    await takeScreenshot(catPage, `03_level_${i + 1}`);
+    await catPage.waitForTimeout(400);
+  }
+
+  // ---- Step 4: 验证底部"已选分类" ----
+  await catPage.waitForTimeout(500);
+  state = await readCategoryState(catPage);
+
+  await debugPageState(catPage, 'before_confirm');
+
+  if (isCategoryCorrect(state.selectedPath, expectedLeaf)) {
+    logger.info(`Bottom selection verified ✓ → "${state.selectedPath}"`);
+    const ok = await clickConfirmAndWait(catPage);
+    if (ok) return await waitForFormLoad(catPage);
+  } else {
+    logger.warn(`Bottom selection is "${state.selectedPath || '(empty)'}" — NOT "${expectedLeaf}"`);
+    logger.warn(`Recent category (ignored): "${state.recentPath}"`);
+  }
+
+  // ---- Step 5: 人工辅助 ----
+  logger.warn('Auto tree click did not change bottom selection — entering manual assist...');
   const manualOk = await manualAssist(catPage, expectedLeaf);
   if (manualOk) return await waitForFormLoad(catPage);
 
   throw new Error(
     'Category selection failed after manual assist.\n' +
     `Expected leaf: "${expectedLeaf}"\n` +
-    `Body has target: ${bodyAfter.includes(expectedLeaf)}\n` +
+    `Bottom selection: "${state.selectedPath || '(empty)'}"\n` +
     'Check Chrome window and screenshots in logs/screenshots/.'
   );
 }
