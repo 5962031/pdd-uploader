@@ -200,6 +200,12 @@ Playwright 传给回调的是 `URL` 对象而非字符串，`.includes()` 返回
 - `scrollIntoViewIfNeeded()` + explicit upload per style first occurrence
 - 输出 `Styles uploaded: mix, red, blue` 确认全部三种图已上传
 
+### 2026-06-05: 一键复用弹窗 + 9行全量预览图 (#12)
+
+**属性修复**: `dismissAutoRecommend()` — 填写前检测并点击"不使用"关闭 "已自动匹配到相似商品属性" 弹窗。
+
+**SKU修复**: 不再按款式跳过后续行。改为逐行 `scrollIntoViewIfNeeded()` → `uploadToRow()` 上传全部9行。每行独立处理。
+
 ## 下一步：label_001 端到端测试
 
 ### 测试步骤

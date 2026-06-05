@@ -122,6 +122,35 @@ async function clickAndSelect(page, ctrl, value) {
   return { ok: false, reason: `"${v}" not in ${opts.join(', ')}` };
 }
 
+/**
+ * 检测并关闭"一键复用/不使用"推荐弹窗
+ */
+async function dismissAutoRecommend(page) {
+  try {
+    const txt = await page.evaluate(() => document.body.innerText);
+    if (txt.includes('已自动匹配到相似商品属性') || txt.includes('一键复用')) {
+      logger.info('Auto-recommend popup detected — clicking "不使用"');
+      const noBtn = page.locator('text=不使用').first();
+      if (await noBtn.count() > 0) {
+        await noBtn.click();
+        await page.waitForTimeout(800);
+        logger.info('  Dismissed ✓');
+        return;
+      }
+      // JS 回退
+      await page.evaluate(() => {
+        const btns = [...document.querySelectorAll('button, span, div')];
+        const no = btns.find(b => b.innerText.trim() === '不使用');
+        if (no) no.click();
+      });
+      await page.waitForTimeout(800);
+      logger.info('  Dismissed (JS fallback) ✓');
+    }
+  } catch (e) {
+    logger.debug(`  dismissAutoRecommend: ${e.message}`);
+  }
+}
+
 async function fillBrand(page, value) {
   const v = String(value).trim();
   try {
@@ -144,6 +173,10 @@ async function fillAttributes(page, product) {
     if (el) el.scrollIntoView({ block: 'center' });
   });
   await page.waitForTimeout(500);
+
+  // 处理"一键复用"推荐弹窗
+  await dismissAutoRecommend(page);
+
   await takeScreenshot(page, '06_attrs_before');
 
   const controls = await scanAllControls(page);
