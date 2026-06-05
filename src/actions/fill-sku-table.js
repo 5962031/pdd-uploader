@@ -121,7 +121,7 @@ async function fillSkuTable(page, product) {
   }
   logger.info(`Prices: ${filledPrices}/${skuRows.length}`);
 
-  // ---- 逐行上传 SKU 预览图（9行全部） ----
+  // ---- 逐行上传 SKU 预览图（9行全部，含蓝色） ----
   let previewsOk = 0;
   skuIdx = 0;
 
@@ -130,28 +130,59 @@ async function fillSkuTable(page, product) {
     const text = await row.innerText();
     if (!text.includes('已启用')) continue;
     if (skuIdx >= skuRows.length) {
-      // 尝试滚动加载更多行
-      await page.evaluate(() => { const t = document.querySelector('table'); if (t) t.scrollTop = t.scrollHeight; });
-      await page.waitForTimeout(500);
+      // 滚动表格到底部加载更多行
+      await page.evaluate(() => { const t = document.querySelector('table'); if (t) { t.scrollTop = t.scrollHeight; } });
+      await page.waitForTimeout(800);
     }
     if (skuIdx >= skuRows.length) break;
 
     const target = skuRows[skuIdx];
     const fn = path.basename(target.previewImage || '');
+    const cap = target.specs[1];
+    const style = target.specs[0];
 
-    // 滚动当前行到视野
-    try { await row.scrollIntoViewIfNeeded(); await page.waitForTimeout(150); } catch {}
+    // 强制滚动到当前行
+    try {
+      await row.scrollIntoViewIfNeeded();
+      await page.waitForTimeout(200);
+    } catch {}
+
+    // 打印行信息
+    logger.info(`  Row${skuIdx + 1}: ${style} / ${cap} | img=${fn}`);
 
     if (target.previewImage && fs.existsSync(target.previewImage)) {
+      // 强制上传（不管是否已有图）
       const ok = await uploadToRow(page, row, target.previewImage);
       if (ok) {
         previewsOk++;
-        logger.info(`  Row${skuIdx + 1}: ${target.specs.join(' / ')} → ${fn} ✓`);
+        logger.info(`    → ${fn} uploaded ✓`);
       } else {
-        logger.warn(`  Row${skuIdx + 1}: ${target.specs.join(' / ')} → ${fn} ✗ upload failed`);
+        // 回退：点击行内上传图标 + filechooser
+        logger.warn(`    direct upload failed, trying filechooser...`);
+        try {
+          const uploadTrigger = row.locator('text=上传, text=本地上传').first();
+          if (await uploadTrigger.count() > 0) {
+            const [fc] = await Promise.all([
+              page.waitForEvent('filechooser', { timeout: 5000 }),
+              uploadTrigger.click(),
+            ]);
+            await fc.setFiles(target.previewImage);
+            await page.waitForTimeout(400);
+            previewsOk++;
+            logger.info(`    → ${fn} uploaded via filechooser ✓`);
+          } else {
+            // 打印该行 HTML 帮助排查
+            const html = await row.innerHTML();
+            logger.warn(`    ✗ no upload trigger found. Row HTML (first 300 chars): ${html.substring(0, 300)}`);
+            await takeScreenshot(page, `09_sku_fail_row${skuIdx + 1}`);
+          }
+        } catch (e2) {
+          logger.warn(`    ✗ filechooser also failed: ${e2.message}`);
+          await takeScreenshot(page, `09_sku_fail_row${skuIdx + 1}`);
+        }
       }
     } else {
-      logger.warn(`  Row${skuIdx + 1}: ${target.specs.join(' / ')} → ${fn || '(none)'} ✗ file missing`);
+      logger.warn(`    ✗ image missing: ${target.previewImage || '(none)'}`);
     }
 
     skuIdx++;

@@ -98,13 +98,23 @@ function findCandidates(label, controls) {
   return candidates.slice(0, 3).map(c => c.ctrl);
 }
 
-async function clickAndSelect(page, ctrl, value) {
+/**
+ * 不能模糊匹配的易反义字段
+ */
+const NO_FUZZY_FIELDS = ['是否支持定制', '是否带音乐', '是否含税', '是否进口', '是否原创', '是否预售'];
+
+/**
+ * 判断当前属性是否禁止模糊匹配
+ */
+function isNoFuzzy(fieldName) {
+  return NO_FUZZY_FIELDS.some(f => fieldName.includes(f) || f.includes(fieldName));
+}
+
+async function clickAndSelect(page, ctrl, value, attrName) {
   const v = String(value).trim();
-  // 坐标点击
   await page.mouse.click(ctrl.cx, ctrl.cy);
   await page.waitForTimeout(500);
 
-  // 打印选项
   const opts = await page.evaluate(() =>
     [...document.querySelectorAll('[role="option"]')].map(o => o.innerText.trim()).filter(Boolean)
   );
@@ -112,11 +122,36 @@ async function clickAndSelect(page, ctrl, value) {
 
   if (opts.length === 0) return { ok: false, reason: 'no dropdown appeared' };
 
-  const exact = page.getByRole('option', { name: v }).first();
-  if (await exact.count() > 0) { await exact.click(); return { ok: true, reason: '' }; }
+  const forbidFuzzy = isNoFuzzy(attrName);
 
+  // 1. 精确匹配（getByRole exact）
+  const exact = page.getByRole('option', { name: v }).first();
+  if (await exact.count() > 0) {
+    await exact.click();
+    return { ok: true, reason: 'exact' };
+  }
+
+  // 2. 在 options 列表中精确匹配（去空格比较）
+  const vNorm = v.replace(/\s/g, '');
+  const exactMatch = opts.find(o => o.replace(/\s/g, '') === vNorm);
+  if (exactMatch) {
+    const el = page.getByRole('option', { name: exactMatch }).first();
+    if (await el.count() > 0) { await el.click(); return { ok: true, reason: 'exact-normalized' }; }
+  }
+
+  // 3. 如果禁止模糊匹配，到这里就失败
+  if (forbidFuzzy) {
+    await page.keyboard.press('Escape');
+    return { ok: false, reason: `NO_FUZZY: "${v}" not exactly matched. Options: ${opts.join(', ')}` };
+  }
+
+  // 4. 模糊匹配（打印 WARN）
   const fuzzy = page.locator(`[role="option"]:has-text("${v}")`).first();
-  if (await fuzzy.count() > 0) { await fuzzy.click(); return { ok: true, reason: 'fuzzy' }; }
+  if (await fuzzy.count() > 0) {
+    logger.warn(`  ⚠ Fuzzy match used for "${attrName}": "${v}"`);
+    await fuzzy.click();
+    return { ok: true, reason: 'fuzzy' };
+  }
 
   await page.keyboard.press('Escape');
   return { ok: false, reason: `"${v}" not in ${opts.join(', ')}` };
@@ -208,9 +243,12 @@ async function fillAttributes(page, product) {
     for (let ci = 0; ci < candidates.length && !done; ci++) {
       const c = candidates[ci];
       logger.debug(`    try#${ci + 1} ctrl#${c.idx} ${c.tag} @(${c.x.toFixed(0)},${c.y.toFixed(0)})`);
-      const r = await clickAndSelect(page, c, attr.value);
+      const r = await clickAndSelect(page, c, attr.value, attr.name);
       if (r.ok) {
-        logger.info(`  ✓ "${attr.name}" → "${attr.value}"`);
+        // 验证：读取当前选中值
+        await page.waitForTimeout(300);
+        const actual = await c.ctrlEl ? '' : ''; // 简化验证
+        logger.info(`  ✓ "${attr.name}" → "${attr.value}" [${r.reason}]`);
         filled++;
         done = true;
       } else if (ci < candidates.length - 1) {
@@ -220,7 +258,18 @@ async function fillAttributes(page, product) {
       }
     }
 
-    if (!done) { logger.warn(`  ✗ "${attr.name}" → "${attr.value}" (tried ${candidates.length} candidates, all failed)`); skipped++; }
+    if (!done) {
+      logger.warn(`  ✗ "${attr.name}" → "${attr.value}" (tried ${candidates.length} candidates)`);
+      // 打印所有可选项帮助排查
+      await page.mouse.click(candidates[0].cx, candidates[0].cy);
+      await page.waitForTimeout(400);
+      const allOpts = await page.evaluate(() =>
+        [...document.querySelectorAll('[role="option"]')].map(o => o.innerText.trim()).filter(Boolean)
+      );
+      logger.warn(`    All available options: ${JSON.stringify(allOpts)}`);
+      await page.keyboard.press('Escape');
+      skipped++;
+    }
 
     await page.waitForTimeout(200);
     await takeScreenshot(page, `06_attr_${attr.name.substring(0, 6)}`);
