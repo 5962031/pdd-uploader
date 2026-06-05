@@ -177,6 +177,16 @@ Playwright 传给回调的是 `URL` 对象而非字符串，`.includes()` 返回
 - 跳过前5个主图/视频 file input，只操作 SKU 区域的 file input
 - 每行打印 款式/容量/价格/图片路径/文件大小
 
+### 2026-06-05: 属性逐标签坐标匹配 + SKU图逐行滚动上传 (#10)
+
+**属性修复**: 不再批量扫描标签后匹配，改为对每个 Excel 属性名单独 `findLabelBox()` + `matchControl()` 坐标匹配（y差<40px，x在右侧）。品牌用 `fillBrand()` 特殊处理。
+
+**SKU预览图修复**: 
+- `scrollIntoViewIfNeeded()` 逐行滚动确保全部9行可见
+- 用 `uploadedStyles` Set 去重：同款式首次遇到时上传，后续行共享
+- 每行打印 款式/容量/图片名
+- 输出 mix/red/blue 对应的行号
+
 ## 下一步：label_001 端到端测试
 
 ### 测试步骤

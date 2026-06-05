@@ -1,85 +1,68 @@
 /**
- * 填写商品属性 —— 基于坐标匹配下拉框
+ * 填写商品属性 —— 坐标匹配下拉框（支持左右两列布局）
  */
 const config = require('../config');
 const logger = require('../helpers/logger');
 const { takeScreenshot } = require('../helpers/screenshot');
 
 /**
- * 扫描页面上所有属性名标签的坐标
+ * 扫描页面上所有属性名文本的 boundingBox
+ * 使用 page.locator 逐个查找 Excel 中的属性名
  */
-async function scanLabelBoxes(page) {
-  const labels = await page.evaluate(() => {
-    const results = [];
-    // 属性名常见标签：短文本（2-10字），在属性区域内
-    const all = document.querySelectorAll('div, span, label');
-    for (const el of all) {
-      const text = (el.innerText || el.textContent || '').trim();
-      if (text.length < 2 || text.length > 15) continue;
-      if (/^[\d.,%¥\s*]+$/.test(text)) continue;
-      if (['品牌','产地','形状','纸张类型','包装方式','是否支持定制','是否带音乐',
-           '适用场景','风格','图案','重要款式','重要产品类型','重要印后工艺',
-           '花型','器型','口味','色号','适用人群'].includes(text)) {
-        const rect = el.getBoundingClientRect();
-        results.push({ label: text, x: rect.x, y: rect.y, w: rect.width, h: rect.height });
-      }
-    }
-    return results;
-  });
-
-  // 去重（取第一个出现的坐标）
-  const seen = new Set();
-  return labels.filter(l => {
-    if (seen.has(l.label)) return false;
-    seen.add(l.label);
-    return true;
-  });
+async function findLabelBox(page, attrName) {
+  try {
+    const el = page.locator(`text="${attrName}"`).first();
+    if (await el.count() === 0) return null;
+    const box = await el.boundingBox();
+    if (!box) return null;
+    return { label: attrName, x: box.x, y: box.y, w: box.width, h: box.height };
+  } catch {
+    return null;
+  }
 }
 
 /**
- * 扫描页面上所有下拉框的坐标
+ * 扫描所有下拉框的坐标
  */
-async function scanControlBoxes(page) {
+async function scanAllSelectBoxes(page) {
   return page.evaluate(() => {
     const results = [];
     const selects = document.querySelectorAll('[data-testid="beast-core-select-htmlInput"]');
     selects.forEach((el, i) => {
-      const rect = el.getBoundingClientRect();
-      if (rect.width > 0 && rect.height > 0) {
-        results.push({ idx: i, x: rect.x, y: rect.y, w: rect.width, h: rect.height, type: 'select' });
+      const r = el.getBoundingClientRect();
+      if (r.width > 20 && r.height > 10) {
+        results.push({ idx: i, x: r.x, y: r.y, w: r.width, h: r.height });
       }
     });
-    const textInputs = document.querySelectorAll('input[type="text"], input:not([type])');
-    textInputs.forEach((el, i) => {
-      const ph = el.placeholder || '';
-      if (ph.includes('品牌') || ph.includes('搜索')) {
-        const rect = el.getBoundingClientRect();
-        if (rect.width > 0 && rect.height > 0) {
-          results.push({ idx: i, x: rect.x, y: rect.y, w: rect.width, h: rect.height, type: 'text' });
-        }
-      }
-    });
+    // 品牌输入框
+    const brand = document.querySelector('input[placeholder*="品牌"]');
+    if (brand) {
+      const r = brand.getBoundingClientRect();
+      if (r.width > 20) results.push({ idx: -1, x: r.x, y: r.y, w: r.width, h: r.height, isBrand: true });
+    }
     return results;
   });
 }
 
 /**
- * 找到与标签同一行的控件（y 接近，x 在右侧）
+ * 找到与标签同行的下拉框（y 差 < 40px，x 在右侧或接近）
  */
-function findMatchingControl(labelBox, controls) {
-  let best = null;
-  let bestDist = Infinity;
+function matchControl(labelBox, controls) {
+  let best = null, bestDy = Infinity;
+  const labelRight = labelBox.x + labelBox.w;
+  const labelCY = labelBox.y + labelBox.h / 2;
 
-  for (const ctrl of controls) {
-    const dy = Math.abs(ctrl.y - labelBox.y);
-    const dx = ctrl.x - (labelBox.x + labelBox.w);
+  for (const c of controls) {
+    const cCY = c.y + c.h / 2;
+    const dy = Math.abs(cCY - labelCY);
+    const dx = c.x - labelRight;
 
-    // 必须在同一行（y 差 < 30px）且在右侧或很接近
-    if (dy < 30 && dx > -50) {
-      const dist = dy + Math.abs(dx);
-      if (dist < bestDist) {
-        bestDist = dist;
-        best = ctrl;
+    // 同一行：y 差 < 40px，且控件在标签右侧（或非常接近 < -100）
+    if (dy < 40 && dx > -100) {
+      const score = dy + Math.max(0, -dx); // 鼓励右侧、惩罚左侧
+      if (score < bestDy || !best) {
+        bestDy = score;
+        best = c;
       }
     }
   }
@@ -88,65 +71,57 @@ function findMatchingControl(labelBox, controls) {
 }
 
 /**
- * 填写一个选择属性
+ * 填写一个 select 属性
  */
-async function fillOneSelect(page, controlIdx, value) {
+async function fillSelect(page, controlIdx, value) {
   const v = String(value).trim();
-  if (!v) return { ok: false, reason: 'empty value' };
+  const selects = page.locator('[data-testid="beast-core-select-htmlInput"]');
+  const cnt = await selects.count();
+  if (controlIdx >= cnt) return { ok: false, reason: `idx ${controlIdx} out of ${cnt}` };
 
-  try {
-    const allSelects = page.locator('[data-testid="beast-core-select-htmlInput"]');
-    const cnt = await allSelects.count();
-    if (controlIdx >= cnt) return { ok: false, reason: `idx ${controlIdx} >= ${cnt}` };
+  const sel = selects.nth(controlIdx);
+  await sel.click();
+  await page.waitForTimeout(400);
 
-    const sel = allSelects.nth(controlIdx);
-    await sel.click();
-    await page.waitForTimeout(300);
+  // 打印可选项
+  const opts = await page.evaluate(() =>
+    [...document.querySelectorAll('[role="option"]')].map(o => o.innerText.trim()).filter(Boolean)
+  );
+  logger.debug(`  Dropdown: ${JSON.stringify(opts.slice(0, 20))}`);
 
-    // 打印所有可选项
-    const options = await page.evaluate(() => {
-      return [...document.querySelectorAll('[role="option"]')]
-        .map(o => (o.innerText || '').trim()).filter(Boolean);
-    });
-    logger.debug(`  Dropdown options: ${JSON.stringify(options.slice(0, 15))}`);
-
-    // 精确匹配
-    const opt = page.getByRole('option', { name: v }).first();
-    if (await opt.count() > 0) {
-      await opt.click();
-      return { ok: true, reason: '' };
-    }
-
-    // 包含匹配
-    const fuzzy = page.locator(`[role="option"]:has-text("${v}")`).first();
-    if (await fuzzy.count() > 0) {
-      await fuzzy.click();
-      return { ok: true, reason: 'fuzzy' };
-    }
-
-    await page.keyboard.press('Escape');
-    return { ok: false, reason: `"${v}" not in dropdown. Options: ${options.slice(0, 10).join(', ')}` };
-  } catch (err) {
-    return { ok: false, reason: err.message };
+  // 精确
+  const exact = page.getByRole('option', { name: v }).first();
+  if (await exact.count() > 0) {
+    await exact.click();
+    return { ok: true, reason: '' };
   }
+  // 包含
+  const fuzzy = page.locator(`[role="option"]:has-text("${v}")`).first();
+  if (await fuzzy.count() > 0) {
+    await fuzzy.click();
+    return { ok: true, reason: 'fuzzy' };
+  }
+
+  await page.keyboard.press('Escape');
+  return { ok: false, reason: `"${v}" not found. Options: ${opts.slice(0, 15).join(', ')}` };
 }
 
 /**
- * 填写一个文本属性
+ * 填写品牌
  */
-async function fillOneText(page, value) {
+async function fillBrand(page, value) {
   const v = String(value).trim();
-  if (!v) return { ok: false, reason: 'empty' };
   try {
     const inp = page.locator('input[placeholder*="品牌"]').first();
-    if (await inp.count() === 0) return { ok: false, reason: 'brand input not found' };
+    if (await inp.count() === 0) return { ok: false, reason: 'no brand input' };
     await inp.fill(v);
-    await page.waitForTimeout(500);
-    const dd = page.locator('[role="option"]:has-text("' + v + '")').first();
+    await page.waitForTimeout(600);
+    // 点下拉结果
+    const dd = page.locator(`[role="option"]:has-text("${v}")`).first();
     if (await dd.count() > 0) { await dd.click(); await page.waitForTimeout(300); }
     return { ok: true, reason: '' };
-  } catch (err) {
-    return { ok: false, reason: err.message };
+  } catch (e) {
+    return { ok: false, reason: e.message };
   }
 }
 
@@ -157,76 +132,63 @@ async function fillAttributes(page, product) {
   logger.step('=== Filling Attributes ===');
 
   const attrs = product.attributes || [];
-  if (attrs.length === 0) {
-    logger.info('No attributes — skipping');
-    return;
-  }
+  if (attrs.length === 0) { logger.info('No attributes — skip'); return; }
 
-  // 滚动到属性区
   await page.evaluate(() => {
-    const el = [...document.querySelectorAll('*')].find(e =>
-      e.innerText === '商品属性' && e.offsetHeight > 0);
+    const el = [...document.querySelectorAll('*')].find(e => e.innerText === '商品属性' && e.offsetHeight > 0);
     if (el) el.scrollIntoView({ block: 'center' });
   });
   await page.waitForTimeout(500);
+  await takeScreenshot(page, '06_attrs_before');
 
-  // 扫描标签和控件坐标
-  const labels = await scanLabelBoxes(page);
-  const controls = await scanControlBoxes(page);
-  logger.info(`${labels.length} labels, ${controls.length} controls found`);
+  const controls = await scanAllSelectBoxes(page);
+  logger.info(`${controls.length} controls found`);
 
-  if (controls.length === 0) {
-    logger.warn('No attribute controls detected — skipping');
-    return;
-  }
-
-  let filled = 0;
-  let skipped = 0;
+  let filled = 0, skipped = 0;
 
   for (const attr of attrs) {
-    // 找匹配的标签
-    const label = labels.find(l =>
-      l.label === attr.name ||
-      l.label.includes(attr.name) ||
-      attr.name.includes(l.label)
-    );
+    // 品牌特殊处理
+    if (attr.name === '品牌') {
+      const r = await fillBrand(page, attr.value);
+      if (r.ok) { logger.info(`  ✓ "${attr.name}" → "${attr.value}"`); filled++; }
+      else { logger.warn(`  ✗ "${attr.name}" FAILED: ${r.reason}`); skipped++; }
+      await page.waitForTimeout(200);
+      continue;
+    }
 
-    if (!label) {
-      logger.warn(`  ⚠ "${attr.name}" — label not found on page (available: ${labels.map(l => l.label).join(', ')})`);
+    // 找属性名的 boundingBox
+    const labelBox = await findLabelBox(page, attr.name);
+    if (!labelBox) {
+      logger.warn(`  ⚠ "${attr.name}" — label not visible on page`);
       skipped++;
       continue;
     }
 
-    const ctrl = findMatchingControl(label, controls);
+    const ctrl = matchControl(labelBox, controls);
     if (!ctrl) {
-      logger.warn(`  ⚠ "${attr.name}" — no control found near label (label at y=${label.y.toFixed(0)})`);
+      logger.warn(`  ⚠ "${attr.name}" — no matching control (label@${labelBox.y.toFixed(0)}, ${controls.length} controls)`);
       skipped++;
       continue;
     }
 
-    logger.debug(`  "${attr.name}" → label@(${label.x.toFixed(0)},${label.y.toFixed(0)}) ctrl@(${ctrl.x.toFixed(0)},${ctrl.y.toFixed(0)})`);
+    logger.debug(`  "${attr.name}" label@y=${labelBox.y.toFixed(0)} → ctrl#${ctrl.idx}@y=${ctrl.y.toFixed(0)}`);
 
-    let result;
-
-    if (ctrl.type === 'text') {
-      result = await fillOneText(page, attr.value);
+    if (ctrl.isBrand) {
+      const r = await fillBrand(page, attr.value);
+      if (r.ok) { filled++; logger.info(`  ✓ "${attr.name}" → "${attr.value}"`); }
+      else { skipped++; logger.warn(`  ✗ "${attr.name}" FAILED`); }
     } else {
-      result = await fillOneSelect(page, ctrl.idx, attr.value);
-    }
-
-    if (result.ok) {
-      logger.info(`  ✓ "${attr.name}" → "${attr.value}"`);
-      filled++;
-    } else {
-      logger.warn(`  ✗ "${attr.name}" → "${attr.value}" FAILED: ${result.reason}`);
-      skipped++;
+      const r = await fillSelect(page, ctrl.idx, attr.value);
+      if (r.ok) { filled++; logger.info(`  ✓ "${attr.name}" → "${attr.value}"`); }
+      else { skipped++; logger.warn(`  ✗ "${attr.name}" FAILED: ${r.reason}`); }
     }
 
     await page.waitForTimeout(200);
+    await takeScreenshot(page, `06_attr_${attr.name.substring(0, 6)}`);
   }
 
-  await takeScreenshot(page, '07_attributes_filled');
-  logger.info(`Attributes: ${filled} filled, ${skipped} skipped / ${attrs.length} total`);
+  await takeScreenshot(page, '07_attrs_done');
+  logger.info(`Attributes: ${filled}/${attrs.length} filled, ${skipped} skipped`);
 }
 
-module.exports = { fillAttributes, scanLabelBoxes, scanControlBoxes };
+module.exports = { fillAttributes };
