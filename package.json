@@ -4,11 +4,15 @@
   "description": "自动化填写拼多多商家后台商品发布表单",
   "main": "src/index.js",
   "scripts": {
-    "start": "node src/index.js",
-    "start:publish": "node src/index.js --publish",
+    "dry-run": "node src/index.js --dry-run",
+    "run": "node src/index.js",
+    "batch": "node src/index.js --batch",
+    "run:label": "node src/index.js --product=label_001",
+    "publish": "node src/index.js --publish",
     "inspect": "node src/inspect.js"
   },
   "dependencies": {
+    "dotenv": "^17.4.2",
     "playwright": "^1.60.0",
     "xlsx": "^0.18.5"
   }

@@ -4,48 +4,80 @@
 
 ## 当前阶段
 
-**Phase 1 完成** — 单商品自动填表 + 干跑校验模式已跑通。
+**端到端就绪** — .env.local 已配置、dotenv 已集成、运行手册已编写。
+等待首次 label_001 端到端测试。
+
+## .env.local 支持
+
+✅ 已安装 `dotenv`，在 `src/index.js` 最开头加载：
+
+```js
+require('dotenv').config({ path: '.env.local' });
+```
+
+`.env.local` 包含以下本地路径（不提交 Git）：
+
+| 变量 | 说明 | 默认值 |
+|------|------|--------|
+| `PDD_ROOT` | 项目根目录 | `D:\pddtest` |
+| `PDD_CHROME_USER_DATA` | Chrome 用户数据目录 | `C:\Users\22303\chrome-debug-profile` |
+| `PDD_CHROME_EXE` | Chrome 可执行文件 | 系统默认路径 |
+| `PDD_CDP_PORT` | CDP 调试端口 | `9222` |
 
 ## 已完成 ✅
 
-| 模块 | 文件 | 状态 |
-|------|------|------|
-| 浏览器启动 | `src/browser/launcher.js` | CDP 连接 + Channel 模式双策略 |
-| 登录态管理 | `src/browser/session.js` | 保存/恢复 storageState，过期自动重登 |
-| Excel 读取 | `src/data/excel-reader.js` | 支持竖排（字段/值）和横排两种格式 |
-| 商品映射 | `src/data/product-mapper.js` | 图片匹配、SKU 笛卡尔积生成 |
-| 字段校验 | `src/data/validator.js` | 标题30汉字、主图数量/大小、SKU价格合法性 |
-| 类目映射 | `src/data/category-map.js` | 关键词→完整类目路径，已注册7个类目 |
-| 分类选择 | `src/pages/category-page.js` | 最近使用一键选 + 搜索回退 |
-| 基本信息 | `src/actions/fill-basic-info.js` | 标题 + 主图上传 |
-| 属性填写 | `src/actions/fill-attributes.js` | 图案/风格/场景/定制/工艺下拉 |
-| SKU 规格 | `src/actions/fill-specs.js` | 款式+容量维度设置 |
-| SKU 价格 | `src/actions/fill-sku-table.js` | 逐行填库存/拼单价/单买价，含 React fallback |
-| 发布守护 | `src/pages/submit-guard.js` | 停在提交前，可选保存草稿 |
-| 批量模式 | `src/index.js` | `--batch` 逐个处理，人工按回车确认 |
-| 干跑校验 | `src/index.js` | `--dry-run` 只校验数据，不开浏览器 |
+| 模块 | 状态 |
+|------|:--:|
+| 浏览器启动（CDP + Channel） | ✅ |
+| 登录态保存/恢复 | ✅ |
+| Excel 读取（竖排/横排自动检测） | ✅ |
+| 商品数据映射 + 图片匹配 | ✅ |
+| 字段校验（标题/图片/SKU） | ✅ |
+| 类目映射表（7个类目已注册） | ✅ |
+| 分类选择（最近使用 + 搜索回退） | ✅ |
+| 基本信息填写（标题 + 主图上传） | ✅ |
+| 属性选择（图案/风格/场景/定制/工艺） | ✅ |
+| SKU 规格设置 | ✅ |
+| SKU 价格表填充（fill + JS fallback） | ✅ |
+| 发布守护（停住不提交） | ✅ |
+| 批量模式（--batch 人工确认） | ✅ |
+| 干跑模式（--dry-run 只校验） | ✅ |
+| .env.local 加载 | ✅ |
+| 安全审计 + .gitignore | ✅ |
+| 运行手册（docs/RUNBOOK.md） | ✅ |
 
-## 未完成 / 待改进 ⚠️
+## 下一步：label_001 端到端测试
 
-- [ ] **真实上架测试**: 只做了 1 个商品（露品汇小卡）的手动上架测试，自动化流程尚未端到端跑通（需要登录态 + Chrome 调试模式）
-- [ ] **SKU 预览图上传**: 当前未自动上传每个 SKU 的预览图（规格图），提交时会报错
-- [ ] **商品详情描述**: 未自动生成/填写图文详情
-- [ ] **报错恢复**: 中途报错后需要手动重新开始，没有断点续传
-- [ ] **日志持久化**: `logs/*.log` 已加入 .gitignore，但运行时日志只追加不轮转
-- [ ] **多账号支持**: 目前只支持一个 Chrome profile
+### 测试步骤
+
+1. **启动 Chrome 调试模式**（参考 `docs/RUNBOOK.md` 第3步）
+2. **在 Chrome 中登录拼多多商家后台**
+3. **干跑校验**：
+   ```powershell
+   cd D:\pddtest\pdd-uploader
+   npm run dry-run
+   ```
+   预期输出：`✅ label_001: 校验通过`
+4. **真实填表**：
+   ```powershell
+   npm run run:label
+   ```
+   预期：自动填写"不干胶标签"商品，停在提交前
+5. **人工检查**：查看浏览器中的表单，确认标题/图片/属性/SKU价格是否正确
+6. **手动发布**：点击"提交并上架"
+
+### 测试通过标准
+- [ ] dry-run 输出 ✅
+- [ ] 标题正确填入
+- [ ] 主图上传成功
+- [ ] 属性下拉全部选中
+- [ ] SKU 表格全部9行有价格和库存
+- [ ] 停在提交按钮前，未自动发布
+- [ ] 截图保存在 logs/screenshots/
 
 ## 已知问题
 
-1. **React 表单 fill() 偶发不生效**: 某些 SKU 价格用 `fill()` 填入后 React 不识别，需要 JS fallback（`fix-all-rows.js` 模式）。已写进 `fill-sku-table.js` 但未充分测试。
-2. **安全验证页面**: PDD 有时弹出滑块验证（`psnl_verification.html`），需要人工介入。
-3. **分类页 "最近使用的分类"**: 首次使用或清空后不存在，需搜索回退。已实现。
-4. **SKU 表格虚拟滚动**: 超过 30 行的 SKU 表格只渲染可见行，需要滚动触发渲染。
-
-## 下一步计划
-
-1. **端到端测试**: 用真实 Chrome + 登录态完整跑一次 label_001 上架
-2. **补 SKU 预览图**: 自动给每个 SKU 行上传同一张小图作为预览
-3. **补详情图/描述**: 上传详情图片到图文编辑区
-4. **第 2 个商品测试**: 上架 bookmarks_001（定制书签）
-5. **第 3 个商品测试**: 上架 polaroid_001（拍立得小卡）
-6. **稳定后考虑**: 自动发布 `--publish`、更多类目映射
+1. SKU 预览图未自动上传（提交时会报错需手动补）
+2. React fill() 偶发不生效（有 JS fallback）
+3. 滑块验证需人工处理
+4. 未做断点续传

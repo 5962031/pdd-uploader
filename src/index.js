@@ -2,13 +2,17 @@
  * pdd-uploader 主入口
  *
  * 用法:
- *   node src/index.js                        # 默认：第一个商品，填完停住
- *   node src/index.js --publish              # 填完后自动发布
- *   node src/index.js --product=label_001     # 指定商品ID
- *   node src/index.js --batch                 # 批量模式：逐个处理Excel全部商品
- *   node src/index.js --verbose               # 详细日志
- *   node src/index.js --dry-run               # 干跑：只校验不填表
+ *   npm run dry-run            # 干跑校验
+ *   npm run run                # 单个商品，填完停住
+ *   npm run batch              # 批量模式
+ *   npm run run:label          # 指定 label_001
+ *   npm run publish            # 自动发布
  */
+// ═══════════════════════════════════════════════
+// 最先加载 .env.local（必须在其他模块之前）
+// ═══════════════════════════════════════════════
+require('dotenv').config({ path: '.env.local' });
+
 const readline = require('readline');
 const config = require('./config');
 const logger = require('./helpers/logger');
