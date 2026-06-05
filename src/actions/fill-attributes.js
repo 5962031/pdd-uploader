@@ -1,159 +1,152 @@
 /**
- * 填写商品属性 —— 扫描页面属性行，按 Excel attributes 表逐项匹配填写
+ * 填写商品属性 —— 基于坐标匹配下拉框
  */
 const config = require('../config');
 const logger = require('../helpers/logger');
 const { takeScreenshot } = require('../helpers/screenshot');
 
 /**
- * 扫描页面上所有属性行
- * 返回 [{ label, text, elIndex, inputType }]
+ * 扫描页面上所有属性名标签的坐标
  */
-async function scanPageAttributeRows(page) {
-  return page.evaluate(() => {
-    const rows = [];
-
-    // 策略：找所有包含 "*" 标记的属性行（PDD 属性区结构）
-    const allDivs = document.querySelectorAll('div');
-    const seen = new Set();
-
-    for (const div of allDivs) {
-      const text = (div.innerText || '').trim();
-      // 跳过非属性区：太短或太长
-      if (text.length < 2 || text.length > 25) continue;
-      // 跳过纯数字、纯符号
-      if (/^[\d.,%\s]+$/.test(text)) continue;
-
-      // 看 div 内部结构：是否有 select input 或 text input
-      const select = div.querySelector('[data-testid="beast-core-select-htmlInput"]');
-      const textInput = div.querySelector('input[type="text"], input:not([type])');
-      const placeholder = select?.placeholder || textInput?.placeholder || '';
-      const hasSelect = !!select;
-      const hasTextInput = !!textInput && (placeholder.includes('品牌') || placeholder.includes('搜索') || placeholder.includes('请'));
-
-      if (hasSelect || hasTextInput) {
-        // 获取 label（去掉 * 等符号）
-        let label = text;
-        // 如果有子元素，取第一个文本节点的前几个字作为 label
-        const children = div.children;
-        if (children.length > 0) {
-          const firstChildText = (children[0].innerText || '').trim();
-          if (firstChildText && firstChildText.length < 15) {
-            label = firstChildText.replace(/\*/g, '').trim();
-          }
-        }
-        label = label.replace(/\*/g, '').trim();
-
-        if (!seen.has(label) && label.length < 15) {
-          seen.add(label);
-          rows.push({
-            label: label,
-            fullText: text,
-            inputType: hasSelect ? 'select' : (hasTextInput ? 'text' : 'unknown'),
-            hasSelect,
-            hasTextInput,
-          });
-        }
+async function scanLabelBoxes(page) {
+  const labels = await page.evaluate(() => {
+    const results = [];
+    // 属性名常见标签：短文本（2-10字），在属性区域内
+    const all = document.querySelectorAll('div, span, label');
+    for (const el of all) {
+      const text = (el.innerText || el.textContent || '').trim();
+      if (text.length < 2 || text.length > 15) continue;
+      if (/^[\d.,%¥\s*]+$/.test(text)) continue;
+      if (['品牌','产地','形状','纸张类型','包装方式','是否支持定制','是否带音乐',
+           '适用场景','风格','图案','重要款式','重要产品类型','重要印后工艺',
+           '花型','器型','口味','色号','适用人群'].includes(text)) {
+        const rect = el.getBoundingClientRect();
+        results.push({ label: text, x: rect.x, y: rect.y, w: rect.width, h: rect.height });
       }
     }
+    return results;
+  });
 
-    // 补充：找"品牌"这种单独一行的
-    const brandInput = document.querySelector('input[placeholder*="品牌"]');
-    if (brandInput) {
-      const parent = brandInput.closest('div');
-      const parentText = (parent?.innerText || '').trim();
-      const label = parentText.split('\n')[0]?.replace(/\*/g, '').trim() || '品牌';
-      if (!seen.has(label)) {
-        rows.push({ label, fullText: parentText, inputType: 'text', hasSelect: false, hasTextInput: true });
-      }
-    }
-
-    return rows;
+  // 去重（取第一个出现的坐标）
+  const seen = new Set();
+  return labels.filter(l => {
+    if (seen.has(l.label)) return false;
+    seen.add(l.label);
+    return true;
   });
 }
 
 /**
- * 填写一个选择框属性
+ * 扫描页面上所有下拉框的坐标
  */
-async function fillSelectRow(page, rowInfo, value) {
+async function scanControlBoxes(page) {
+  return page.evaluate(() => {
+    const results = [];
+    const selects = document.querySelectorAll('[data-testid="beast-core-select-htmlInput"]');
+    selects.forEach((el, i) => {
+      const rect = el.getBoundingClientRect();
+      if (rect.width > 0 && rect.height > 0) {
+        results.push({ idx: i, x: rect.x, y: rect.y, w: rect.width, h: rect.height, type: 'select' });
+      }
+    });
+    const textInputs = document.querySelectorAll('input[type="text"], input:not([type])');
+    textInputs.forEach((el, i) => {
+      const ph = el.placeholder || '';
+      if (ph.includes('品牌') || ph.includes('搜索')) {
+        const rect = el.getBoundingClientRect();
+        if (rect.width > 0 && rect.height > 0) {
+          results.push({ idx: i, x: rect.x, y: rect.y, w: rect.width, h: rect.height, type: 'text' });
+        }
+      }
+    });
+    return results;
+  });
+}
+
+/**
+ * 找到与标签同一行的控件（y 接近，x 在右侧）
+ */
+function findMatchingControl(labelBox, controls) {
+  let best = null;
+  let bestDist = Infinity;
+
+  for (const ctrl of controls) {
+    const dy = Math.abs(ctrl.y - labelBox.y);
+    const dx = ctrl.x - (labelBox.x + labelBox.w);
+
+    // 必须在同一行（y 差 < 30px）且在右侧或很接近
+    if (dy < 30 && dx > -50) {
+      const dist = dy + Math.abs(dx);
+      if (dist < bestDist) {
+        bestDist = dist;
+        best = ctrl;
+      }
+    }
+  }
+
+  return best;
+}
+
+/**
+ * 填写一个选择属性
+ */
+async function fillOneSelect(page, controlIdx, value) {
   const v = String(value).trim();
-  if (!v) return false;
+  if (!v) return { ok: false, reason: 'empty value' };
 
   try {
-    // 通过 label 文本找到包含它的属性行
-    const allDivs = page.locator('div');
-    const cnt = await allDivs.count();
+    const allSelects = page.locator('[data-testid="beast-core-select-htmlInput"]');
+    const cnt = await allSelects.count();
+    if (controlIdx >= cnt) return { ok: false, reason: `idx ${controlIdx} >= ${cnt}` };
 
-    for (let i = 0; i < cnt; i++) {
-      const div = allDivs.nth(i);
-      const text = await div.innerText();
-      if (!text.includes(rowInfo.label)) continue;
-      if (text.length > 60) continue; // 不是属性行
+    const sel = allSelects.nth(controlIdx);
+    await sel.click();
+    await page.waitForTimeout(300);
 
-      // 在这一行里找 select
-      const select = div.locator('[data-testid="beast-core-select-htmlInput"]').first();
-      if (await select.count() === 0) continue;
+    // 打印所有可选项
+    const options = await page.evaluate(() => {
+      return [...document.querySelectorAll('[role="option"]')]
+        .map(o => (o.innerText || '').trim()).filter(Boolean);
+    });
+    logger.debug(`  Dropdown options: ${JSON.stringify(options.slice(0, 15))}`);
 
-      await select.click();
-      await page.waitForTimeout(300);
-
-      // 选值
-      const opt = page.getByRole('option', { name: v }).first();
-      if (await opt.count() > 0) {
-        await opt.click();
-        logger.info(`  ✓ "${rowInfo.label}" → "${v}"`);
-        return true;
-      }
-
-      // 包含匹配
-      const fuzzy = page.locator(`[role="option"]:has-text("${v}")`).first();
-      if (await fuzzy.count() > 0) {
-        await fuzzy.click();
-        logger.info(`  ✓ "${rowInfo.label}" → "${v}" (fuzzy)`);
-        return true;
-      }
-
-      await page.keyboard.press('Escape');
-      logger.warn(`  ✗ "${rowInfo.label}" — option "${v}" not in dropdown`);
-      return false;
+    // 精确匹配
+    const opt = page.getByRole('option', { name: v }).first();
+    if (await opt.count() > 0) {
+      await opt.click();
+      return { ok: true, reason: '' };
     }
 
-    logger.warn(`  ✗ "${rowInfo.label}" — row element not found in page`);
-    return false;
+    // 包含匹配
+    const fuzzy = page.locator(`[role="option"]:has-text("${v}")`).first();
+    if (await fuzzy.count() > 0) {
+      await fuzzy.click();
+      return { ok: true, reason: 'fuzzy' };
+    }
+
+    await page.keyboard.press('Escape');
+    return { ok: false, reason: `"${v}" not in dropdown. Options: ${options.slice(0, 10).join(', ')}` };
   } catch (err) {
-    logger.warn(`  ✗ "${rowInfo.label}" error: ${err.message}`);
-    return false;
+    return { ok: false, reason: err.message };
   }
 }
 
 /**
- * 填写文本输入属性（品牌等）
+ * 填写一个文本属性
  */
-async function fillTextRow(page, rowInfo, value) {
+async function fillOneText(page, value) {
   const v = String(value).trim();
-  if (!v) return false;
-
+  if (!v) return { ok: false, reason: 'empty' };
   try {
-    // 找品牌输入框
-    const input = page.locator('input[placeholder*="品牌"]').first();
-    if (await input.count() > 0) {
-      await input.fill(v);
-      await page.waitForTimeout(500);
-      // 品牌可能需要从下拉结果中选
-      const dropdown = page.locator('[role="option"]:has-text("' + v + '")').first();
-      if (await dropdown.count() > 0) {
-        await dropdown.click();
-        await page.waitForTimeout(300);
-      }
-      logger.info(`  ✓ "${rowInfo.label}" → "${v}"`);
-      return true;
-    }
-
-    logger.warn(`  ✗ "${rowInfo.label}" — text input not found`);
-    return false;
+    const inp = page.locator('input[placeholder*="品牌"]').first();
+    if (await inp.count() === 0) return { ok: false, reason: 'brand input not found' };
+    await inp.fill(v);
+    await page.waitForTimeout(500);
+    const dd = page.locator('[role="option"]:has-text("' + v + '")').first();
+    if (await dd.count() > 0) { await dd.click(); await page.waitForTimeout(300); }
+    return { ok: true, reason: '' };
   } catch (err) {
-    logger.warn(`  ✗ "${rowInfo.label}" error: ${err.message}`);
-    return false;
+    return { ok: false, reason: err.message };
   }
 }
 
@@ -165,13 +158,11 @@ async function fillAttributes(page, product) {
 
   const attrs = product.attributes || [];
   if (attrs.length === 0) {
-    logger.info('No attributes in Excel — skipping');
+    logger.info('No attributes — skipping');
     return;
   }
 
-  logger.info(`Excel attributes: ${attrs.length} row(s)`);
-
-  // 滚动到属性区域
+  // 滚动到属性区
   await page.evaluate(() => {
     const el = [...document.querySelectorAll('*')].find(e =>
       e.innerText === '商品属性' && e.offsetHeight > 0);
@@ -179,15 +170,13 @@ async function fillAttributes(page, product) {
   });
   await page.waitForTimeout(500);
 
-  // 扫描页面属性行
-  const pageRows = await scanPageAttributeRows(page);
-  logger.info(`Page attribute rows detected: ${pageRows.length}`);
-  pageRows.forEach(r => logger.debug(`  [${r.inputType}] "${r.label}"`));
+  // 扫描标签和控件坐标
+  const labels = await scanLabelBoxes(page);
+  const controls = await scanControlBoxes(page);
+  logger.info(`${labels.length} labels, ${controls.length} controls found`);
 
-  if (pageRows.length === 0) {
-    logger.warn('No attribute rows detected on page');
-    logger.info('Page may not require attributes for this category — continuing');
-    await takeScreenshot(page, '06_attributes_empty');
+  if (controls.length === 0) {
+    logger.warn('No attribute controls detected — skipping');
     return;
   }
 
@@ -195,34 +184,49 @@ async function fillAttributes(page, product) {
   let skipped = 0;
 
   for (const attr of attrs) {
-    // 在页面属性行中找匹配
-    const match = pageRows.find(r =>
-      r.label === attr.name ||
-      r.label.includes(attr.name) ||
-      attr.name.includes(r.label)
+    // 找匹配的标签
+    const label = labels.find(l =>
+      l.label === attr.name ||
+      l.label.includes(attr.name) ||
+      attr.name.includes(l.label)
     );
 
-    if (!match) {
-      logger.warn(`  ⚠ "${attr.name}" → not on page (page has: ${pageRows.map(r => r.label).join(', ')})`);
+    if (!label) {
+      logger.warn(`  ⚠ "${attr.name}" — label not found on page (available: ${labels.map(l => l.label).join(', ')})`);
       skipped++;
       continue;
     }
 
-    let ok = false;
-    if (match.inputType === 'select') {
-      ok = await fillSelectRow(page, match, attr.value);
-    } else {
-      ok = await fillTextRow(page, match, attr.value);
+    const ctrl = findMatchingControl(label, controls);
+    if (!ctrl) {
+      logger.warn(`  ⚠ "${attr.name}" — no control found near label (label at y=${label.y.toFixed(0)})`);
+      skipped++;
+      continue;
     }
 
-    if (ok) filled++;
-    else skipped++;
+    logger.debug(`  "${attr.name}" → label@(${label.x.toFixed(0)},${label.y.toFixed(0)}) ctrl@(${ctrl.x.toFixed(0)},${ctrl.y.toFixed(0)})`);
+
+    let result;
+
+    if (ctrl.type === 'text') {
+      result = await fillOneText(page, attr.value);
+    } else {
+      result = await fillOneSelect(page, ctrl.idx, attr.value);
+    }
+
+    if (result.ok) {
+      logger.info(`  ✓ "${attr.name}" → "${attr.value}"`);
+      filled++;
+    } else {
+      logger.warn(`  ✗ "${attr.name}" → "${attr.value}" FAILED: ${result.reason}`);
+      skipped++;
+    }
 
     await page.waitForTimeout(200);
   }
 
   await takeScreenshot(page, '07_attributes_filled');
-  logger.info(`Attributes: ${filled} filled, ${skipped} skipped (of ${attrs.length} total)`);
+  logger.info(`Attributes: ${filled} filled, ${skipped} skipped / ${attrs.length} total`);
 }
 
-module.exports = { fillAttributes, scanPageAttributeRows };
+module.exports = { fillAttributes, scanLabelBoxes, scanControlBoxes };

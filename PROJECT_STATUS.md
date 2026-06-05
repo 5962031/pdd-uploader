@@ -167,6 +167,16 @@ Playwright 传给回调的是 `URL` 对象而非字符串，`.includes()` 返回
 - 每行打印款式/容量/价格/预览图路径/文件是否存在
 - dry-run 增加 SKU 预览图检查
 
+### 2026-06-05: 属性坐标匹配 + SKU预览图按款式检测 (#9)
+
+**属性修复**: `scanLabelBoxes()` → `scanControlBoxes()` → `findMatchingControl()` 基于 boundingBox 坐标匹配（同 y 行 + 右侧 x）。打印 dropdown 全部可选项辅助调试。
+
+**SKU预览图修复**:
+- 自动检测模式：`rowsWithFile <= 6` → 按款式上传（3款式×1图），否则按行上传（9行×1图）
+- `getStyleImageMap()` 提取款式→图片映射（mix.png/red.png/blue.png）
+- 跳过前5个主图/视频 file input，只操作 SKU 区域的 file input
+- 每行打印 款式/容量/价格/图片路径/文件大小
+
 ## 下一步：label_001 端到端测试
 
 ### 测试步骤
