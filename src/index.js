@@ -88,23 +88,23 @@ async function processOneProduct(page, product, args) {
   logger.step(`=== Category for: ${product.productId} ===`);
   const categoryPath = resolveCategoryPath(product);
 
-  // ---- 选择类目 ----
-  await selectCategory(page.context(), page, categoryPath);
+  // ---- 选择类目 → 返回商品表单页 ----
+  const formPage = await selectCategory(page.context(), page, categoryPath);
 
   // ---- 填写基本信息 ----
-  await fillBasicInfo(page, product);
+  await fillBasicInfo(formPage, product);
 
   // ---- 填写属性 ----
-  await fillAttributes(page, product);
+  await fillAttributes(formPage, product);
 
   // ---- 设置规格 ----
-  await fillSpecifications(page, product);
+  await fillSpecifications(formPage, product);
 
   // ---- 填写 SKU 价格表 ----
-  await fillSkuTable(page, product);
+  await fillSkuTable(formPage, product);
 
   // ---- 停止在发布之前 ----
-  const result = await stopBeforePublish(page, args.publish);
+  const result = await stopBeforePublish(formPage, args.publish);
 
   return result;
 }
