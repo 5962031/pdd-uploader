@@ -1,0 +1,39 @@
+{
+  "template_id": "print_label",
+  "template_name": "不干胶标签",
+  "description": "贴纸/标签/便利贴类印刷品",
+  "version": "1.0",
+  "category_path": "数码电器>文具电教/文化用品/商务用品>纸张本册>不干胶标签",
+  "image_folders": {
+    "main": "main",
+    "detail": "detail",
+    "sku": "sku"
+  },
+  "required_attributes": [
+    { "name": "品牌", "default": "无品牌" },
+    { "name": "是否支持定制", "default": "是" },
+    { "name": "产地", "default": "中国大陆" },
+    { "name": "纸张类型", "default": "铜版纸" },
+    { "name": "形状", "default": "矩形" },
+    { "name": "包装方式", "default": "袋装" }
+  ],
+  "optional_attributes": [],
+  "sku_dimensions": [
+    { "name": "款式", "type": "select" },
+    { "name": "容量", "type": "select" }
+  ],
+  "media_types": {
+    "main_image_format": ["png", "jpg", "jpeg", "webp"],
+    "max_main_images": 10,
+    "max_detail_images": 50,
+    "sku_preview_required": true
+  },
+  "risk_checks": {
+    "require_trademark": false,
+    "require_license": false,
+    "restricted_keywords": [],
+    "price_min": 0.5,
+    "price_max": 999,
+    "stock_min": 1
+  }
+}

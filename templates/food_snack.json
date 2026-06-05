@@ -1,0 +1,45 @@
+{
+  "template_id": "food_snack",
+  "template_name": "食品快消品",
+  "description": "零食/冲饮/粮油等快消食品",
+  "version": "1.0",
+  "category_path": "食品保健>零食/坚果/特产",
+  "image_folders": {
+    "main": "主图",
+    "detail": "详情图",
+    "sku": "SKU图"
+  },
+  "required_attributes": [
+    { "name": "品牌", "default": "" },
+    { "name": "产地", "default": "中国大陆" },
+    { "name": "保质期", "default": "" },
+    { "name": "生产日期", "default": "" },
+    { "name": "包装方式", "default": "袋装" },
+    { "name": "食品生产许可证编号", "default": "" },
+    { "name": "净含量", "default": "" },
+    { "name": "储存方法", "default": "常温" }
+  ],
+  "optional_attributes": [
+    { "name": "口味", "default": "" },
+    { "name": "是否含糖", "default": "" },
+    { "name": "适用人群", "default": "通用" }
+  ],
+  "sku_dimensions": [
+    { "name": "口味", "type": "select" },
+    { "name": "容量", "type": "select" }
+  ],
+  "media_types": {
+    "main_image_format": ["png", "jpg", "jpeg", "webp"],
+    "max_main_images": 10,
+    "max_detail_images": 50,
+    "sku_preview_required": true
+  },
+  "risk_checks": {
+    "require_trademark": false,
+    "require_license": true,
+    "restricted_keywords": ["疗效", "治疗", "抗癌", "减肥", "美白"],
+    "price_min": 1,
+    "price_max": 200,
+    "stock_min": 1
+  }
+}

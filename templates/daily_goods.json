@@ -1,0 +1,43 @@
+{
+  "template_id": "daily_goods",
+  "template_name": "日用品",
+  "description": "居家日用/清洁/收纳等日用品",
+  "version": "1.0",
+  "category_path": "居家日用>收纳整理",
+  "image_folders": {
+    "main": "主图",
+    "detail": "详情图",
+    "sku": "SKU图"
+  },
+  "required_attributes": [
+    { "name": "品牌", "default": "" },
+    { "name": "产地", "default": "中国大陆" },
+    { "name": "材质", "default": "" },
+    { "name": "规格", "default": "" },
+    { "name": "适用场景", "default": "通用" },
+    { "name": "包装方式", "default": "袋装" }
+  ],
+  "optional_attributes": [
+    { "name": "颜色", "default": "" },
+    { "name": "尺寸", "default": "" },
+    { "name": "是否可定制", "default": "否" }
+  ],
+  "sku_dimensions": [
+    { "name": "颜色", "type": "select" },
+    { "name": "规格", "type": "select" }
+  ],
+  "media_types": {
+    "main_image_format": ["png", "jpg", "jpeg", "webp"],
+    "max_main_images": 10,
+    "max_detail_images": 50,
+    "sku_preview_required": false
+  },
+  "risk_checks": {
+    "require_trademark": false,
+    "require_license": false,
+    "restricted_keywords": [],
+    "price_min": 1,
+    "price_max": 500,
+    "stock_min": 1
+  }
+}

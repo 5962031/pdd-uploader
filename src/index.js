@@ -24,6 +24,7 @@ const { restoreSession, saveSession, waitForLogin } = require('./browser/session
 const { readWorkbook } = require('./data/excel-reader');
 const { mapProduct } = require('./data/product-mapper');
 const { validateProduct } = require('./data/validator');
+const { applyTemplate } = require('./data/template-loader');
 const { resolveCategoryPath } = require('./data/category-map');
 const { selectCategory } = require('./pages/category-page');
 const { fillBasicInfo } = require('./actions/fill-basic-info');
@@ -121,10 +122,15 @@ async function batchMode(page, products, workbook, args) {
 
   for (let i = 0; i < products.length; i++) {
     const raw = products[i];
-    const product = mapProduct(raw, workbook.attributes, workbook.sku);
+    const tmpl = applyTemplate(raw, workbook.attributes.filter(a =>
+      String(a.product_id || '').trim() === String(raw.product_id || '').trim()
+    ));
+    const mergedAttrs = tmpl.attributes.map(a => ({ product_id: raw.product_id, '属性名': a.name, '属性值': a.value }));
+    const rawWithCat = { ...raw, category_path: raw.category_path || tmpl.categoryPath };
+    const product = mapProduct(rawWithCat, mergedAttrs, workbook.sku);
 
     logger.info(`\n${'═'.repeat(50)}`);
-    logger.info(`Product ${i + 1}/${products.length}: ${product.productId}`);
+    logger.info(`Product ${i + 1}/${products.length}: ${product.productId} (${tmpl.templateName})`);
     logger.info(`Title: ${product.title.substring(0, 50)}...`);
     logger.info(`${'═'.repeat(50)}`);
 
@@ -179,10 +185,25 @@ async function main() {
   if (args.dryRun) {
     logger.info('\n=== DRY RUN MODE ===');
     workbook.products.forEach((raw, i) => {
-      const product = mapProduct(raw, workbook.attributes, workbook.sku);
+      // 应用模板
+      const tmpl = applyTemplate(raw, workbook.attributes.filter(a =>
+        String(a.product_id || '').trim() === String(raw.product_id || '').trim()
+      ));
+      const mergedAttrs = tmpl.attributes.map(a => ({ product_id: raw.product_id, '属性名': a.name, '属性值': a.value }));
+      // 用合并后的属性和类目路径映射产品（临时注入 category_path）
+      const rawWithCat = { ...raw, category_path: raw.category_path || tmpl.categoryPath };
+      const product = mapProduct(rawWithCat, mergedAttrs, workbook.sku);
+
       const v = validateProduct(product);
       const icon = v.valid ? '✅' : '❌';
-      logger.info(`${icon} [${i + 1}] ${product.productId}: ${product.title.substring(0, 40)} | ${product.skuRows.length} SKUs | ${product.attributes.length} attrs | ${product.skuDimensions.length} dims`);
+      logger.info(`${icon} [${i + 1}] ${product.productId}`);
+      logger.info(`    模板: ${tmpl.templateName} (${tmpl.templateId})`);
+      logger.info(`    类目: ${rawWithCat.category_path} | 来源: ${raw.category_path ? 'Excel' : (tmpl.templateId === 'generic' ? 'default' : 'template')}`);
+      logger.info(`    属性: ${product.attributes.length} (req检查: ${tmpl.template?.required_attributes?.length || 0} required)`);
+      logger.info(`    图片: ${product.mainImages.length} main / ${product.detailImage ? '✓' : '✗'} detail | SKU: ${product.skuRows.length} rows`);
+      if (tmpl.template?.image_folders) {
+        logger.info(`    图目: main=${tmpl.template.image_folders.main} detail=${tmpl.template.image_folders.detail} sku=${tmpl.template.image_folders.sku}`);
+      }
       // 检查 SKU 预览图
       product.skuRows.forEach((r, j) => {
         const imgPath = r.previewImage;
@@ -218,15 +239,24 @@ async function main() {
   } else {
     // 单个商品
     let product;
+    const mapWithTemplate = (raw) => {
+      const tmpl = applyTemplate(raw, workbook.attributes.filter(a =>
+        String(a.product_id || '').trim() === String(raw.product_id || '').trim()
+      ));
+      const attrs = tmpl.attributes.map(a => ({ product_id: raw.product_id, '属性名': a.name, '属性值': a.value }));
+      const rawCat = { ...raw, category_path: raw.category_path || tmpl.categoryPath };
+      return mapProduct(rawCat, attrs, workbook.sku);
+    };
+
     if (args.productId) {
       const raw = workbook.products.find(r => {
         const vals = Object.values(r);
         return vals.some(v => String(v).includes(args.productId));
       });
       if (!raw) throw new Error(`Product "${args.productId}" not found in Excel`);
-      product = mapProduct(raw, workbook.attributes, workbook.sku);
+      product = mapWithTemplate(raw);
     } else {
-      product = mapProduct(workbook.products[0], workbook.attributes, workbook.sku);
+      product = mapWithTemplate(workbook.products[0]);
       logger.info(`Using first product: ${product.productId}`);
     }
 
