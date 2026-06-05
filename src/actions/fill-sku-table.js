@@ -1,166 +1,235 @@
 /**
- * 填写 SKU 价格表 —— 逐行填入库存、拼单价、单买价
+ * 填写 SKU 价格表 —— 按行序填充 + 批量模式兜底
  */
 const config = require('../config');
 const logger = require('../helpers/logger');
 const { takeScreenshot } = require('../helpers/screenshot');
 
 /**
- * 在行文本中匹配 SKU 数据
- * @param {string} rowText
- * @param {import('../data/product-mapper').SkuRow[]} skuRows
- * @returns {import('../data/product-mapper').SkuRow|null}
+ * 统计页面 SKU 行状态
  */
-function findMatchingSku(rowText, skuRows) {
-  for (const sku of skuRows) {
-    // 行文本中必须包含这个 SKU 的所有规格值
-    const allMatch = sku.specs.every(spec => {
-      // 支持部分匹配（因为 "红色" 可能包含在 "红蓝双色混装" 中，小心反向匹配）
-      return rowText.includes(spec);
-    });
-    if (allMatch) return sku;
-  }
-  return null;
-}
+async function inspectSkuTable(page) {
+  const rows = page.locator('tr');
+  const count = await rows.count();
+  const info = [];
 
-/**
- * 使用 Playwright fill() 填写一个 SKU 行
- */
-async function fillOneRow(page, row, prices) {
-  const inputs = row.locator(config.selectors.skuTable.emptyInput);
-  const inputCount = await inputs.count();
+  for (let i = 0; i < count; i++) {
+    const row = rows.nth(i);
+    const text = await row.innerText();
+    if (!text.includes('已启用')) continue;
 
-  if (inputCount < 2) return false;
-
-  // 检查第一个 input 是否为空或默认值
-  const v0 = await inputs.nth(0).inputValue();
-  if (v0 !== '' && v0 !== '0' && v0 !== '请输入') {
-    return false; // 已经填过
-  }
-
-  // prices = [stock, groupPrice, singlePrice]
-  await inputs.nth(0).fill(prices[0]);  // 库存
-  await page.waitForTimeout(config.timeouts.skuRowFill);
-  await inputs.nth(1).fill(prices[1]);  // 拼单价
-  await page.waitForTimeout(config.timeouts.skuRowFill);
-  if (inputCount >= 3) {
-    await inputs.nth(2).fill(prices[2]); // 单买价
-    await page.waitForTimeout(config.timeouts.skuRowFill);
-  }
-
-  return true;
-}
-
-/**
- * JS 回退方式填值（处理 React 不认 fill() 的情况）
- */
-async function fillOneRowFallback(page, row, prices) {
-  await row.evaluate((el, vals) => {
-    const inputs = el.querySelectorAll('input[placeholder="请输入"]');
-    if (inputs.length < 2) return;
-
-    const setNative = (inp, val) => {
-      const desc = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
-      const setter = desc.set;
-      setter.call(inp, val);
-      inp.dispatchEvent(new Event('input', { bubbles: true }));
-      inp.dispatchEvent(new Event('change', { bubbles: true }));
-    };
-
-    setNative(inputs[0], vals[0]); // stock
-    setNative(inputs[1], vals[1]); // group price
-    if (inputs.length >= 3) {
-      setNative(inputs[2], vals[2]); // single price
+    const inputs = row.locator('input[placeholder="请输入"]');
+    const ic = await inputs.count();
+    const vals = [];
+    for (let j = 0; j < Math.min(ic, 3); j++) {
+      vals.push(await inputs.nth(j).inputValue().catch(() => '?'));
     }
-  }, prices);
 
-  await page.waitForTimeout(100);
+    info.push({
+      row: i + 1,
+      inputs: ic,
+      values: vals,
+      text: text.substring(0, 80).replace(/\n/g, ' '),
+    });
+  }
+
+  return info;
+}
+
+/**
+ * 批量填充 —— 所有行统一库存+价格（不依赖文本匹配）
+ */
+async function batchFillSkuTable(page, stock, groupPrice, singlePrice) {
+  logger.step('Batch filling all SKU rows...');
+
+  const rows = page.locator('tr');
+  const count = await rows.count();
+  let filled = 0;
+
+  for (let i = 0; i < count; i++) {
+    const row = rows.nth(i);
+    const text = await row.innerText();
+    if (!text.includes('已启用')) continue;
+
+    const inputs = row.locator('input[placeholder="请输入"]');
+    const ic = await inputs.count();
+    if (ic < 2) continue;
+
+    const v0 = await inputs.nth(0).inputValue();
+    if (v0 !== '' && v0 !== '0' && v0 !== '请输入') continue; // already filled
+
+    try {
+      await inputs.nth(0).fill(String(stock));
+      await page.waitForTimeout(50);
+      await inputs.nth(1).fill(String(groupPrice));
+      await page.waitForTimeout(50);
+      if (ic >= 3) {
+        await inputs.nth(2).fill(String(singlePrice));
+        await page.waitForTimeout(50);
+      }
+      filled++;
+    } catch (err) {
+      logger.warn(`  Row ${i + 1} fill error: ${err.message}`);
+    }
+  }
+
+  return filled;
+}
+
+/**
+ * 检查所有行是否价格一致 → 如果是，使用批量模式
+ */
+function allSamePrice(skuRows) {
+  if (skuRows.length <= 1) return true;
+  const first = skuRows[0];
+  for (let i = 1; i < skuRows.length; i++) {
+    if (skuRows[i].groupPrice !== first.groupPrice ||
+        skuRows[i].singlePrice !== first.singlePrice ||
+        skuRows[i].stock !== first.stock) {
+      return false;
+    }
+  }
   return true;
 }
 
 /**
- * 填写整个 SKU 价格表
- * @param {import('playwright').Page} page
- * @param {import('../data/product-mapper').Product} product
+ * 主入口
  */
 async function fillSkuTable(page, product) {
   logger.step('=== Filling SKU Price Table ===');
 
-  // 确保 SKU 表格区域可见
-  try {
-    await page.evaluate(() => {
-      const table = document.querySelector('table');
-      if (table) table.scrollIntoView({ block: 'center' });
-    });
-    await page.waitForTimeout(500);
-  } catch { /* ignore */ }
+  // 滚动到表格区域
+  await page.evaluate(() => {
+    const table = document.querySelector('table');
+    if (table) table.scrollIntoView({ block: 'center' });
+  });
+  await page.waitForTimeout(500);
 
-  const rows = page.locator(config.selectors.skuTable.rows);
-  const rowCount = await rows.count();
+  // 检查当前 SKU 表状态
+  let info = await inspectSkuTable(page);
+  logger.info(`SKU table: ${info.length} enabled rows`);
 
-  if (rowCount === 0) {
-    throw new Error('SKU table has no rows. Did specs get generated?');
+  if (info.length === 0) {
+    throw new Error('SKU table has no enabled rows. Did specs get generated?');
   }
 
-  logger.info(`SKU table has ${rowCount} total rows, searching for ${product.skuRows.length} data rows...`);
+  // 打印每行信息
+  info.forEach(r => {
+    logger.debug(`  Row ${r.row}: ${r.inputs} inputs, vals=[${r.values.join(',')}], text="${r.text.substring(0, 60)}"`);
+  });
 
-  let filledCount = 0;
-  let skippedCount = 0;
-  const failedRows = [];
+  const skuRows = product.skuRows;
+  logger.info(`Expected ${skuRows.length} data rows`);
 
-  for (let i = 0; i < rowCount; i++) {
-    const row = rows.nth(i);
-    const text = await row.innerText();
+  // 判断使用批量模式还是逐行模式
+  const useBatch = allSamePrice(skuRows);
 
-    // 只处理启用的行
-    if (!text.includes(config.selectors.skuTable.rowFilter)) continue;
+  let filled = 0;
 
-    const matchedSku = findMatchingSku(text, product.skuRows);
-    if (!matchedSku) {
-      skippedCount++;
-      continue;
-    }
+  if (useBatch) {
+    // === 批量模式：所有行统一价格 ===
+    const { stock, groupPrice, singlePrice } = skuRows[0];
+    logger.info(`All SKUs same price — using batch mode: 拼${groupPrice} / 单${singlePrice} / 库存${stock}`);
+    filled = await batchFillSkuTable(page, stock, groupPrice, singlePrice);
 
-    const prices = [matchedSku.stock, matchedSku.groupPrice, matchedSku.singlePrice];
+  } else {
+    // === 逐行模式：价格不同，按行序匹配 ===
+    logger.info('SKU prices differ — filling row by row...');
 
-    // 先尝试 Playwright fill()
-    let ok = await fillOneRow(page, row, prices);
+    const rows = page.locator('tr');
+    const totalRows = await rows.count();
+    let skuIdx = 0;
 
-    // 如果 fill 没触发（值可能还是旧的），用 JS fallback
-    if (!ok) {
-      // skip — already filled
-      continue;
-    }
+    for (let i = 0; i < totalRows && skuIdx < skuRows.length; i++) {
+      const row = rows.nth(i);
+      const text = await row.innerText();
+      if (!text.includes('已启用')) continue;
 
-    // 验证是否填成功
-    try {
-      const inputs = row.locator(config.selectors.skuTable.emptyInput);
-      const vAfter = await inputs.nth(0).inputValue();
-      if (vAfter === prices[0] || vAfter === '' || vAfter === '0') {
-        // fill 触发了但需要等 React 更新
-        // 检查是否需要 fallback
-        await page.waitForTimeout(300);
-        const vCheck = await inputs.nth(1).inputValue();
-        if (vCheck !== prices[1]) {
-          // fill didn't stick, use fallback
-          await fillOneRowFallback(page, row, prices);
-        }
+      const targetSku = skuRows[skuIdx];
+      const prices = [targetSku.stock, targetSku.groupPrice, targetSku.singlePrice];
+
+      const inputs = row.locator('input[placeholder="请输入"]');
+      const ic = await inputs.count();
+      if (ic < 2) { skuIdx++; continue; }
+
+      const v0 = await inputs.nth(0).inputValue();
+      if (v0 !== '' && v0 !== '0' && v0 !== '请输入') {
+        skuIdx++;
+        continue;
       }
-    } catch { /* verification failed, continue */ }
 
-    filledCount++;
+      try {
+        await inputs.nth(0).fill(prices[0]);
+        await page.waitForTimeout(60);
+        await inputs.nth(1).fill(prices[1]);
+        await page.waitForTimeout(60);
+        if (ic >= 3) {
+          await inputs.nth(2).fill(prices[2]);
+          await page.waitForTimeout(60);
+        }
+        filled++;
+      } catch (err) {
+        logger.warn(`  Row ${i + 1} (sku ${skuIdx}) fill error: ${err.message}`);
+      }
+
+      skuIdx++;
+    }
   }
 
   await takeScreenshot(page, '09_sku_table_filled');
 
-  logger.info(`SKU table: ${filledCount} filled, ${skippedCount} skipped`);
-  if (filledCount !== product.skuRows.length) {
-    logger.warn(`Expected ${product.skuRows.length} fills but only filled ${filledCount}`);
-    logger.warn('Some SKU rows may not have been matched. Check Excel spec values vs table row text.');
-  }
-  if (failedRows.length > 0) {
-    logger.error(`Failed rows: ${failedRows.join(', ')}`);
+  // ---- 校验 ----
+  info = await inspectSkuTable(page);
+  const total = info.length;
+  const fullyFilled = info.filter(r => {
+    return r.values.length >= 2 &&
+           r.values[0] && r.values[0] !== '' && r.values[0] !== '0' && r.values[0] !== '请输入' &&
+           r.values[1] && r.values[1] !== '' && r.values[1] !== '请输入';
+  }).length;
+
+  const missingStock = info.filter(r => !r.values[0] || r.values[0] === '' || r.values[0] === '0' || r.values[0] === '请输入').length;
+  const missingPrice = info.filter(r => !r.values[1] || r.values[1] === '' || r.values[1] === '请输入').length;
+  const missingSingle = info.filter(r => r.values.length < 3 || !r.values[2] || r.values[2] === '' || r.values[2] === '请输入').length;
+
+  logger.info(`SKU verification: ${fullyFilled}/${total} fully filled`);
+  if (missingStock > 0) logger.warn(`  ${missingStock} rows missing stock`);
+  if (missingPrice > 0) logger.warn(`  ${missingPrice} rows missing group price`);
+  if (missingSingle > 0) logger.warn(`  ${missingSingle} rows missing single price`);
+
+  if (fullyFilled < total) {
+    logger.warn(`Not all rows filled! Trying JS fallback for remaining ${total - fullyFilled} rows...`);
+    // JS fallback: 直接用 DOM 设值
+    await page.evaluate((data) => {
+      const rows = document.querySelectorAll('tr');
+      let skuIdx = 0;
+      for (const row of rows) {
+        if (!row.innerText.includes('已启用')) continue;
+        const inputs = row.querySelectorAll('input[placeholder="请输入"]');
+        if (inputs.length < 2) { skuIdx++; continue; }
+        if (inputs[0].value && inputs[0].value !== '0' && inputs[0].value !== '请输入') { skuIdx++; continue; }
+
+        const s = data[skuIdx] || data[0] || { stock: '999', groupPrice: '9.9', singlePrice: '10.9' };
+        const vals = [s.stock, s.groupPrice, s.singlePrice];
+        for (let j = 0; j < Math.min(inputs.length, 3); j++) {
+          const desc = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
+          desc.set.call(inputs[j], vals[j]);
+          inputs[j].dispatchEvent(new Event('input', { bubbles: true }));
+          inputs[j].dispatchEvent(new Event('change', { bubbles: true }));
+        }
+        skuIdx++;
+      }
+    }, skuRows);
+
+    // 重新统计
+    await page.waitForTimeout(1000);
+    info = await inspectSkuTable(page);
+    const finalFilled = info.filter(r => {
+      return r.values.length >= 2 &&
+             r.values[0] && r.values[0] !== '' && r.values[0] !== '0' && r.values[0] !== '请输入' &&
+             r.values[1] && r.values[1] !== '' && r.values[1] !== '请输入';
+    }).length;
+    logger.info(`After JS fallback: ${finalFilled}/${info.length} filled`);
   }
 }
 
-module.exports = { fillSkuTable, findMatchingSku, fillOneRow, fillOneRowFallback };
+module.exports = { fillSkuTable, batchFillSkuTable, inspectSkuTable };

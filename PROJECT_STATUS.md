@@ -118,6 +118,25 @@ Playwright 传给回调的是 `URL` 对象而非字符串，`.includes()` 返回
 5. 逐级点击后重新用 `readCategoryState()` 验证
 6. manual assist 后同样重新读取底部已选分类
 
+### 2026-06-05: 属性字段动态识别 + SKU 按行序填充 (#6)
+
+**属性问题**: 硬编码的 "图案/风格/适用场景" 等标签在当前类目不干胶标签页面中不存在，全部 WARN。
+
+**属性修复** (`fill-attributes.js`):
+1. `inspectAttributes()` — 扫描页面上所有真实属性字段（select + text input）
+2. 优先使用 Excel `attributes_json` 字段（JSON格式），按真实字段名匹配填写
+3. 找不到的属性只 WARN，不影响后续流程
+
+**SKU问题**: 2/9 行填了（22%），合并单元格导致后续行不重复显示 "款式" 文本，文本匹配失败。
+
+**SKU修复** (`fill-sku-table.js`):
+1. `allSamePrice()` — 检测是否所有行价格一致 → 自动切换批量模式
+2. `batchFillSkuTable()` — 统一填所有行，不依赖文本匹配
+3. 逐行模式改为按行序匹配（行1→SKU1, 行2→SKU2...），不读文本
+4. `inspectSkuTable()` — 打印每行文本+input数量+值，方便调试
+5. JS fallback — fill() 失败后用原生 setter 兜底
+6. 填完后校验：stock/group/single 不为空
+
 ## 下一步：label_001 端到端测试
 
 ### 测试步骤
