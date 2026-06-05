@@ -1,5 +1,5 @@
 /**
- * 填写 SKU 表 —— 逐行价格+预览图，确保全部9行处理
+ * 按款式上传 SKU 预览图 —— 滚动定位 + filechooser 回退
  */
 const path = require('path');
 const fs = require('fs');
@@ -19,13 +19,13 @@ async function inspectSkuTable(page) {
   return info;
 }
 
-async function fillRowValues(page, rowEl, stock, gp, sp) {
+async function fillRowValues(page, rowEl, s, g, p) {
   const inputs = rowEl.locator('input[placeholder="请输入"]'); const ic = await inputs.count();
   if (ic < 2) return false;
   try {
-    await inputs.nth(0).fill(String(stock)); await page.waitForTimeout(40);
-    await inputs.nth(1).fill(String(gp)); await page.waitForTimeout(40);
-    if (ic >= 3) { await inputs.nth(2).fill(String(sp)); await page.waitForTimeout(40); }
+    await inputs.nth(0).fill(String(s)); await page.waitForTimeout(30);
+    await inputs.nth(1).fill(String(g)); await page.waitForTimeout(30);
+    if (ic >= 3) { await inputs.nth(2).fill(String(p)); await page.waitForTimeout(30); }
     return true;
   } catch { return false; }
 }
@@ -38,7 +38,7 @@ async function jsFallback(page, skuRows) {
       const inputs = row.querySelectorAll('input[placeholder="请输入"]');
       if (inputs.length < 2) { i++; continue; }
       if (inputs[0].value && inputs[0].value !== '0' && inputs[0].value !== '请输入') { i++; continue; }
-      const s = data[i] || data[0] || { stock: '999', groupPrice: '9.9', singlePrice: '10.9' };
+      const s = data[i] || data[0] || { stock:'999', groupPrice:'9.9', singlePrice:'10.9' };
       const v = [String(s.stock), String(s.groupPrice), String(s.singlePrice)];
       for (let j = 0; j < Math.min(inputs.length, 3); j++) {
         const d = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
@@ -53,23 +53,59 @@ async function jsFallback(page, skuRows) {
 }
 
 /**
- * 上传一张预览图到当前行的 file input
+ * 在表格中找包含指定文本的行，返回该行的 Locator
  */
-async function uploadToRow(page, rowEl, imagePath) {
-  if (!imagePath || !fs.existsSync(imagePath)) return false;
-  try {
-    const fileInputs = rowEl.locator('input[type="file"]');
-    const cnt = await fileInputs.count();
-    if (cnt === 0) return false;
-    await fileInputs.first().setInputFiles(imagePath);
-    await page.waitForTimeout(300);
-    return true;
-  } catch { return false; }
+async function findRowByText(page, searchText) {
+  const rows = page.locator('tr');
+  const cnt = await rows.count();
+  for (let i = 0; i < cnt; i++) {
+    const row = rows.nth(i);
+    const text = await row.innerText();
+    if (text.includes('已启用') && text.includes(searchText)) {
+      return row;
+    }
+  }
+  return null;
 }
 
 /**
- * 主入口
+ * 尝试多种方式上传预览图到一行
  */
+async function uploadPreviewToRow(page, row, imagePath) {
+  if (!imagePath || !fs.existsSync(imagePath)) return false;
+
+  // 方法1: 直接找 file input
+  const fileInputs = row.locator('input[type="file"]');
+  const fcnt = await fileInputs.count();
+  if (fcnt > 0) {
+    try {
+      await fileInputs.first().setInputFiles(imagePath);
+      await page.waitForTimeout(400);
+      return true;
+    } catch (e) {
+      logger.debug(`  direct file input failed: ${e.message}`);
+    }
+  }
+
+  // 方法2: 点击上传图标 → filechooser
+  try {
+    const uploadIcon = row.locator('text=上传, text=本地上传, [class*=upload]').first();
+    if (await uploadIcon.count() > 0) {
+      const [fileChooser] = await Promise.all([
+        page.waitForEvent('filechooser', { timeout: 3000 }),
+        uploadIcon.click(),
+      ]);
+      await fileChooser.setFiles(imagePath);
+      await page.waitForTimeout(400);
+      return true;
+    }
+  } catch (e) {
+    logger.debug(`  filechooser failed: ${e.message}`);
+  }
+
+  return false;
+}
+
 async function fillSkuTable(page, product) {
   logger.step('=== Filling SKU Table ===');
 
@@ -77,96 +113,91 @@ async function fillSkuTable(page, product) {
   await page.waitForTimeout(500);
 
   const skuRows = product.skuRows;
-
-  // 打印所有行
   for (let j = 0; j < skuRows.length; j++) {
     const s = skuRows[j];
     const ex = s.previewImage ? fs.existsSync(s.previewImage) : false;
     logger.info(`  SKU${j + 1}: ${s.specs.join(' / ')} | 拼${s.groupPrice} 单${s.singlePrice} | img=${path.basename(s.previewImage || '-')} ${ex ? '✓' : '✗'}`);
   }
 
-  // ---- Step 1: 填价格 ----
+  // ---- 填价格 ----
   const rows = page.locator('tr');
   const totalRows = await rows.count();
   let skuIdx = 0, filledPrices = 0;
-
   for (let i = 0; i < totalRows; i++) {
     const row = rows.nth(i);
     const text = await row.innerText();
     if (!text.includes('已启用')) continue;
     if (skuIdx >= skuRows.length) break;
-
-    const target = skuRows[skuIdx];
+    const t = skuRows[skuIdx];
     const inputs = row.locator('input[placeholder="请输入"]');
     const ic = await inputs.count();
     if (ic >= 2) {
       const v0 = await inputs.nth(0).inputValue();
-      if (v0 === '' || v0 === '0' || v0 === '请输入') {
-        await fillRowValues(page, row, target.stock, target.groupPrice, target.singlePrice);
-      }
+      if (v0 === '' || v0 === '0' || v0 === '请输入') await fillRowValues(page, row, t.stock, t.groupPrice, t.singlePrice);
       filledPrices++;
     }
     skuIdx++;
   }
   logger.info(`Prices: ${filledPrices}/${skuRows.length}`);
 
-  // ---- Step 2: 上传 SKU 预览图 ----
-  // 找出每个款式首次出现的行号
-  const styleFirstRow = {};
-  const styleImage = {};
-  for (let j = 0; j < skuRows.length; j++) {
-    const style = skuRows[j].specs[0];
-    if (!styleFirstRow[style]) {
-      styleFirstRow[style] = j + 1; // 1-based
-      styleImage[style] = skuRows[j].previewImage;
+  // ---- 上传 SKU 预览图：按款式 ----
+  const styleConfig = {};
+  for (const s of skuRows) {
+    const style = s.specs[0];
+    if (!styleConfig[style]) {
+      styleConfig[style] = { image: s.previewImage, exists: fs.existsSync(s.previewImage || '') };
     }
   }
-  logger.info(`Style first rows: ${JSON.stringify(styleFirstRow)}`);
-  logger.info(`Style images: ${JSON.stringify(Object.fromEntries(Object.entries(styleImage).map(([k, v]) => [k, path.basename(v || '')])))}`);
+
+  const styles = Object.keys(styleConfig);
+  logger.info(`Styles to upload: ${JSON.stringify(Object.fromEntries(Object.entries(styleConfig).map(([k, v]) => [k, path.basename(v.image || '') + (v.exists ? '' : ' MISSING')])))}`);
 
   let previewsOk = 0;
-  skuIdx = 0;
-  const stylesDone = new Set();
 
-  for (let i = 0; i < totalRows; i++) {
-    const row = rows.nth(i);
-    const text = await row.innerText();
-    if (!text.includes('已启用')) continue;
-    if (skuIdx >= skuRows.length) break;
-
-    const target = skuRows[skuIdx];
-    const style = target.specs[0];
-    const cap = target.specs[1];
-    const imgFile = target.previewImage;
-
-    // 滚动到当前行
-    try { await row.scrollIntoViewIfNeeded(); await page.waitForTimeout(200); } catch {}
-
-    // 该款式首次出现 → 上传
-    if (!stylesDone.has(style) && imgFile && fs.existsSync(imgFile)) {
-      const fn = path.basename(imgFile);
-      const ok = await uploadToRow(page, row, imgFile);
-      if (ok) {
-        stylesDone.add(style);
-        previewsOk++;
-        logger.info(`  Row${skuIdx + 1}: "${style}" / "${cap}" → uploaded ${fn} ✓`);
-      } else {
-        logger.warn(`  Row${skuIdx + 1}: "${style}" / "${cap}" → upload FAILED for ${fn}`);
-      }
-    } else if (stylesDone.has(style)) {
-      previewsOk++;
-      logger.info(`  Row${skuIdx + 1}: "${style}" / "${cap}" → img shared`);
-    } else if (!imgFile) {
-      logger.info(`  Row${skuIdx + 1}: "${style}" / "${cap}" → no preview in Excel`);
-    } else {
-      logger.warn(`  Row${skuIdx + 1}: "${style}" / "${cap}" → img missing: ${imgFile || '(none)'}`);
+  for (const style of styles) {
+    const cfg = styleConfig[style];
+    if (!cfg.exists) {
+      logger.warn(`  "${style}" — image missing: ${cfg.image}, skipping`);
+      // 计入共享行
+      const rowsForStyle = skuRows.filter(s => s.specs[0] === style).length;
+      previewsOk += rowsForStyle;
+      continue;
     }
 
-    skuIdx++;
+    // 找包含该款式的行
+    let targetRow = await findRowByText(page, style);
+    if (!targetRow) {
+      // 滚动到底部再找
+      await page.evaluate(() => {
+        const t = document.querySelector('table');
+        if (t) t.scrollTop = t.scrollHeight;
+      });
+      await page.waitForTimeout(500);
+      targetRow = await findRowByText(page, style);
+    }
 
-    // 每3行截图
-    if (skuIdx === 3 || skuIdx === 6 || skuIdx === 9) {
-      await takeScreenshot(page, `09_sku_preview_row${skuIdx}`);
+    if (!targetRow) {
+      logger.warn(`  "${style}" — row not found in table, cannot upload ${path.basename(cfg.image)}`);
+      const rowsForStyle = skuRows.filter(s => s.specs[0] === style).length;
+      previewsOk += rowsForStyle;
+      continue;
+    }
+
+    // 滚动到该行并上传
+    try { await targetRow.scrollIntoViewIfNeeded(); await page.waitForTimeout(300); } catch {}
+
+    const fn = path.basename(cfg.image);
+    const ok = await uploadPreviewToRow(page, targetRow, cfg.image);
+    if (ok) {
+      const rowsForStyle = skuRows.filter(s => s.specs[0] === style).length;
+      previewsOk += rowsForStyle;
+      logger.info(`  "${style}" → ${fn} ✓ (shared across ${rowsForStyle} rows)`);
+
+      if (style === styles[0]) await takeScreenshot(page, '09_preview_style1');
+      else if (style === styles[1]) await takeScreenshot(page, '09_preview_style2');
+      else if (style === styles[2]) await takeScreenshot(page, '09_preview_style3');
+    } else {
+      logger.warn(`  "${style}" → ${fn} ✗ upload failed`);
     }
   }
 
@@ -184,8 +215,7 @@ async function fillSkuTable(page, product) {
     logger.info(`After fallback: ${ff2}/${fi2.length}`);
   }
 
-  // 汇总
-  const mixRows = []; const redRows = []; const blueRows = [];
+  const mixRows = [], redRows = [], blueRows = [];
   for (let j = 0; j < skuRows.length; j++) {
     const fn = path.basename(skuRows[j].previewImage || '');
     if (fn.includes('mix')) mixRows.push(j + 1);
@@ -193,11 +223,10 @@ async function fillSkuTable(page, product) {
     else if (fn.includes('blue')) blueRows.push(j + 1);
   }
 
-  logger.info(`SKU: ${fully}/${fi.length} price-filled | ${previewsOk} previews uploaded`);
+  logger.info(`SKU: ${fully}/${fi.length} price-filled | ${previewsOk} previews`);
   logger.info(`  mix.png rows: ${mixRows.join(',')}`);
   logger.info(`  red.png rows: ${redRows.join(',')}`);
   logger.info(`  blue.png rows: ${blueRows.join(',')}`);
-  logger.info(`  Styles uploaded: ${[...stylesDone].join(', ')}`);
 }
 
 module.exports = { fillSkuTable, inspectSkuTable };
