@@ -7,7 +7,7 @@ const config = require('../config');
 const logger = require('../helpers/logger');
 
 /**
- * 解析产品图片目录
+ * 解析产品图片基础目录
  */
 function findImageDir(productId) {
   const assetDir = path.join(config.paths.assets, productId);
@@ -17,18 +17,75 @@ function findImageDir(productId) {
 }
 
 /**
+ * 读取子目录下所有图片文件（按文件名排序）
+ */
+function readFolderImages(folderPath) {
+  if (!folderPath || !fs.existsSync(folderPath)) return [];
+  try {
+    const files = fs.readdirSync(folderPath)
+      .filter(f => /\.(png|jpe?g|gif|webp|bmp)$/i.test(f))
+      .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+    return files.map(f => path.join(folderPath, f));
+  } catch { return []; }
+}
+
+/**
  * 匹配图片文件
+ *
+ * 支持三种模式:
+ *   1. "main"  → 读取 {imageDir}/main/ 下全部图片
+ *   2. "detail" → 读取 {imageDir}/detail/ 下全部图片
+ *   3. 具体文件名/通配符 → 在 imageDir 根目录匹配（向后兼容）
  */
 function matchImages(imageDir, pattern) {
   if (!imageDir || !fs.existsSync(imageDir)) return [];
 
-  const patterns = String(pattern || '').split(/[;,，；]/).map(s => s.trim()).filter(Boolean);
-  if (patterns.length === 0) return [];
+  const rawPatterns = String(pattern || '').split(/[;,，；]/).map(s => s.trim()).filter(Boolean);
+  if (rawPatterns.length === 0) return [];
 
-  const allFiles = fs.readdirSync(imageDir);
   const matched = [];
 
-  for (let pat of patterns) {
+  for (const pat of rawPatterns) {
+    // ---- 模式: 子文件夹关键词（英文 + 中文，优先匹配不合并） ----
+    let targetFolder = null;
+    const p = pat.toLowerCase();
+    if (p === 'main' || p === 'main/' || pat === '主图') {
+      // 优先匹配用户写的名称，找不到再试另一个
+      const preferred = pat === '主图' ? '主图' : 'main';
+      const fallback = pat === '主图' ? 'main' : '主图';
+      for (const fn of [preferred, fallback]) {
+        const dir = path.join(imageDir, fn);
+        const imgs = readFolderImages(dir);
+        if (imgs.length > 0) {
+          logger.info(`  ${fn}/ → ${imgs.length} images: ${imgs.map(f => path.basename(f)).join(', ')}`);
+          matched.push(...imgs);
+          targetFolder = fn;
+          break;  // 找到一个就停，不合并
+        }
+      }
+      if (!targetFolder) logger.warn(`  main/主图 folders empty or not found under ${imageDir}`);
+      continue;
+    }
+
+    if (p === 'detail' || p === 'detail/' || pat === '详情图') {
+      const preferred = pat === '详情图' ? '详情图' : 'detail';
+      const fallback = pat === '详情图' ? 'detail' : '详情图';
+      for (const fn of [preferred, fallback]) {
+        const dir = path.join(imageDir, fn);
+        const imgs = readFolderImages(dir);
+        if (imgs.length > 0) {
+          logger.info(`  ${fn}/ → ${imgs.length} images: ${imgs.map(f => path.basename(f)).join(', ')}`);
+          matched.push(...imgs);
+          targetFolder = fn;
+          break;
+        }
+      }
+      if (!targetFolder) logger.warn(`  detail/详情图 folders empty or not found under ${imageDir}`);
+      continue;
+    }
+
+    // ---- 模式: 具体文件名/通配符（向后兼容） ----
+    const allFiles = fs.readdirSync(imageDir);
     const basename = path.basename(pat);
     const searchName = basename || pat;
 
@@ -51,6 +108,37 @@ function matchImages(imageDir, pattern) {
   }
 
   return matched;
+}
+
+/**
+ * 解析 SKU 预览图的完整路径
+ *   1. 先查 {imageDir}/sku/{filename}
+ *   2. 再查 {imageDir}/{filename}（向后兼容根目录）
+ */
+function resolveSkuPreviewPath(imageDir, previewFile) {
+  if (!previewFile || !imageDir) return '';
+
+  const basename = path.basename(String(previewFile));
+  if (!basename) return '';
+
+  // 按优先级查找: SKU图/ → sku/ → 根目录
+  for (const folderName of ['SKU图', 'sku']) {
+    const subFile = path.join(imageDir, folderName, basename);
+    if (fs.existsSync(subFile)) {
+      logger.info(`  SKU preview: ${folderName}/${basename} ✓`);
+      return subFile;
+    }
+  }
+
+  // 回退到根目录
+  const rootFile = path.join(imageDir, basename);
+  if (fs.existsSync(rootFile)) {
+    logger.info(`  SKU preview: ${basename} ✓ (root)`);
+    return rootFile;
+  }
+
+  logger.warn(`  SKU preview not found: SKU图/${basename}, sku/${basename}, or ${basename}`);
+  return '';
 }
 
 /**
@@ -128,12 +216,7 @@ function extractSkuRows(skuSheet, productId, imageDir) {
     const specCode = String(row['规格编码'] || row['spec_code'] || '');
     const previewFile = String(row['SKU预览图'] || row['preview'] || '');
 
-    // 解析预览图路径
-    let previewPath = '';
-    if (previewFile && imageDir) {
-      const full = path.join(imageDir, path.basename(previewFile));
-      previewPath = fs.existsSync(full) ? full : '';
-    }
+    const previewPath = resolveSkuPreviewPath(imageDir, previewFile);
 
     return { specs, stock, groupPrice, singlePrice, specCode, previewImage: previewPath };
   });
@@ -189,4 +272,4 @@ function mapProduct(productRow, attrSheet, skuSheet) {
   return product;
 }
 
-module.exports = { mapProduct, findImageDir, matchImages, extractDimensions, extractSkuRows };
+module.exports = { mapProduct, findImageDir, matchImages, readFolderImages, resolveSkuPreviewPath, extractDimensions, extractSkuRows };

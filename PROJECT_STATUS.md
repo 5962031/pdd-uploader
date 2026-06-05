@@ -97,6 +97,44 @@ pdd-uploader/
 └── PROJECT_STATUS.md          # 本文件
 ```
 
+### 2026-06-05: 中文图片目录支持 (#14)
+
+**新增**: `主图` / `详情图` / `SKU图` 中文文件夹名别名。
+
+| Excel 写法 | 优先查找 | 回退查找 | 向后兼容 |
+|-----------|---------|---------|---------|
+| `主图` | `主图/` | `main/` | ✅ |
+| `main` | `main/` | `主图/` | ✅ |
+| `详情图` | `详情图/` | `detail/` | ✅ |
+| `detail` | `detail/` | `详情图/` | ✅ |
+| `mix.png` (SKU) | `SKU图/mix.png` | `sku/mix.png` → 根目录 | ✅ |
+
+### 2026-06-05: 图片子目录识别 (#13)
+
+**新增功能**: `matchImages()` 和 `resolveSkuPreviewPath()` 支持三种模式:
+
+| 模式 | Excel 写法 | 解析逻辑 |
+|------|-----------|---------|
+| 主图子目录 | `main` | 读取 `{product_id}/main/` 下全部图片，按文件名排序 |
+| 详情图子目录 | `detail` | 读取 `{product_id}/detail/` 下全部图片 |
+| SKU 预览图 | `mix.png` | 先查 `{product_id}/sku/mix.png`，再回退根目录 |
+| 向后兼容 | `main1.png;main2.png` | 在根目录匹配具体文件名 |
+
+**目录结构示例**:
+```
+assets/label_002/
+├── main/         # 主图 (main_images: "main")
+│   ├── 1.png
+│   ├── 2.png
+│   └── 3.png
+├── detail/       # 详情图 (detail_image: "detail")
+│   └── 1.jpg
+└── sku/          # SKU 预览图
+    ├── mix.png
+    ├── red.png
+    └── blue.png
+```
+
 ## 已知限制
 
 1. 仅测试了 label_001（不干胶标签）一个商品
