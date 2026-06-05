@@ -14,6 +14,8 @@
 require('dotenv').config({ path: '.env.local' });
 
 const readline = require('readline');
+const fs = require('fs');
+const path = require('path');
 const config = require('./config');
 const logger = require('./helpers/logger');
 const { takeScreenshot } = require('./helpers/screenshot');
@@ -180,7 +182,17 @@ async function main() {
       const product = mapProduct(raw, workbook.attributes, workbook.sku);
       const v = validateProduct(product);
       const icon = v.valid ? '✅' : '❌';
-      logger.info(`${icon} [${i + 1}] ${product.productId}: ${product.title.substring(0, 40)} | ${product.skuRows.length} SKUs | ${product.attributes.length} attrs`);
+      logger.info(`${icon} [${i + 1}] ${product.productId}: ${product.title.substring(0, 40)} | ${product.skuRows.length} SKUs | ${product.attributes.length} attrs | ${product.skuDimensions.length} dims`);
+      // 检查 SKU 预览图
+      product.skuRows.forEach((r, j) => {
+        const imgPath = r.previewImage;
+        const exists = imgPath ? fs.existsSync(imgPath) : false;
+        if (!exists && imgPath) {
+          logger.warn(`    ⚠️ SKU${j + 1} preview image missing: ${imgPath}`);
+        }
+      });
+      const previewCount = product.skuRows.filter(r => r.previewImage && fs.existsSync(r.previewImage)).length;
+      logger.info(`    SKU previews: ${previewCount}/${product.skuRows.length} found`);
       v.errors.forEach(e => logger.error(`    ❌ ${e.field}: ${e.message}`));
       v.warnings.forEach(w => logger.warn(`    ⚠️ ${w.field}: ${w.message}`));
     });

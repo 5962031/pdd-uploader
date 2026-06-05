@@ -157,6 +157,16 @@ Playwright 传给回调的是 `URL` 对象而非字符串，`.includes()` 返回
 - `extractDimensions()` 自动从 sku 工作表提取规格维度（款式/容量等）
 - `batchMode()` 传递 `workbook` 对象
 
+### 2026-06-05: 属性定位修复 + SKU预览图严格读取 (#8)
+
+**属性修复**: `scanPageAttributeRows()` — 扫描页面所有属性行（含 select 和 text input 的 div 块），按 label 匹配。不再依赖 `text=` locator。
+
+**SKU预览图修复**:
+- `resolvePreviewPath()` — 严格从 `D:\pddtest\assets\{productId}\{previewFile}` 读取
+- 图片缺失时只 WARN，不 fallback 到主图
+- 每行打印款式/容量/价格/预览图路径/文件是否存在
+- dry-run 增加 SKU 预览图检查
+
 ## 下一步：label_001 端到端测试
 
 ### 测试步骤
