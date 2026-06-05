@@ -76,6 +76,23 @@ Playwright 传给回调的是 `URL` 对象而非字符串，`.includes()` 返回
 4. **人工辅助模式** — 自动失败后提示用户手动选类目，按 Enter 继续
 5. **JS 回退点击** — Playwright click 失败后用 `page.evaluate` 直接找元素点击
 
+### 2026-06-05: 类目选择修复 (#3)
+
+**问题 1**: JS fallback 的 `clickByText()` 无论是否找到元素都返回 true，导致日志显示 "✓ Clicked 不干胶标签" 但实际选中的是 "贺卡/明信片"。
+
+**问题 2**: `findConfirmButton()` 匹配了 "发布新商品"（导航栏按钮），而不是底部蓝色 "确认发布该类商品"。
+
+**问题 3**: `debugPageState()` 的 buttons slice 只有 15 个，底部确认按钮未被打印。
+
+**修复**:
+1. `clickByText()` 现在返回 `true/false`，`page.evaluate` 必须找到元素并点击才返回非 false 值
+2. `findConfirmButton()` 现在使用白名单 + 黑名单：
+   - 白名单: "确认发布该类商品", "确认发布此类商品", "确认发布这类商品", "确认发布"
+   - 黑名单（禁止匹配）: "发布新商品", "发布机会商品", "发布同款", "发布相似品"
+3. `debugPageState()` buttons slice 改为 80，并单独打印含 "确认" 的元素
+4. 新增 `readSelectedCategory()` — 点击完类目后读取页面"已选分类"文本
+5. 最终校验：只有已选分类包含目标叶子名称时才点确认，否则进入 `manualAssist()`
+
 ## 下一步：label_001 端到端测试
 
 ### 测试步骤

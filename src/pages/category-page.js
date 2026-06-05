@@ -1,96 +1,168 @@
 /**
- * 分类选择页 —— 逐级点击类目树 + 调试输出 + 人工辅助模式
+ * 分类选择页 —— 逐级点击类目树 + 调试输出 + 严格校验 + 人工辅助
  */
 const readline = require('readline');
 const config = require('../config');
 const logger = require('../helpers/logger');
 const { takeScreenshot } = require('../helpers/screenshot');
 
+// ═══════════════════════════════════════════════
+// 仅允许这些文本作为"确认发布"按钮
+// ═══════════════════════════════════════════════
+const CONFIRM_TEXTS = [
+  '确认发布该类商品',
+  '确认发布此类商品',
+  '确认发布这类商品',
+  '确认发布',
+];
+
+// ═══════════════════════════════════════════════
+// 禁止匹配的文本（这些不是确认按钮）
+// ═══════════════════════════════════════════════
+const FORBIDDEN_CONTAINS = [
+  '发布新商品',
+  '发布机会商品',
+  '发布同款',
+  '发布相似品',
+];
+
 /**
- * 调试：打印当前页面关键信息
+ * 调试：打印页面底部按钮（含确认按钮区域）
  */
 async function debugPageState(page, label) {
   const url = page.url();
-  logger.debug(`[${label}] Current URL: ${url}`);
+  logger.debug(`[${label}] URL: ${url}`);
 
-  // 打印所有按钮文本
+  // 打印所有可见按钮（扩大到80）
   const btns = await page.evaluate(() => {
     return [...document.querySelectorAll('button')]
-      .map(b => b.innerText.trim())
-      .filter(Boolean)
-      .slice(0, 15);
+      .filter(b => b.offsetHeight > 0)  // 只取可见的
+      .map(b => (b.innerText || '').trim())
+      .filter(Boolean);
   });
-  logger.debug(`[${label}] Buttons: ${JSON.stringify(btns)}`);
+  logger.debug(`[${label}] Visible buttons (${btns.length}): ${JSON.stringify(btns)}`);
 
-  // 查找包含关键词的元素
-  const hits = await page.evaluate(() => {
-    const keywords = ['确认', '发布', '类商品', '下一步', '提交', '类目', '分类'];
-    const found = [];
-    const all = document.querySelectorAll('*');
-    for (const el of all) {
-      const text = (el.innerText || '').trim();
-      if (text.length > 2 && text.length < 30 && keywords.some(k => text.includes(k))) {
-        found.push(text);
-      }
-    }
-    return [...new Set(found)].slice(0, 20);
+  // 特别打印包含 "确认" 的元素
+  const confirmHits = await page.evaluate(() => {
+    return [...document.querySelectorAll('button, a, span, div')]
+      .filter(el => el.offsetHeight > 0 && (el.innerText || '').includes('确认'))
+      .map(el => (el.innerText || '').trim().substring(0, 60))
+      .filter(Boolean);
   });
-  logger.debug(`[${label}] Keyword hits: ${JSON.stringify(hits)}`);
+  logger.debug(`[${label}] Elements with "确认": ${JSON.stringify(confirmHits)}`);
 }
 
 /**
- * 查找确认按钮 —— 兼容多种文本
+ * 读取页面底部"已选分类"区域
+ */
+async function readSelectedCategory(page) {
+  try {
+    const text = await page.evaluate(() => {
+      // 尝试多种方式读取已选分类
+      // PDD 的分类页在底部或顶部面包屑显示当前选择
+      const selectors = [
+        '[class*="selected"]',
+        '[class*="breadcrumb"]',
+        '[class*="crumb"]',
+        '[class*="path"]',
+      ];
+      for (const sel of selectors) {
+        const el = document.querySelector(sel);
+        if (el && el.innerText) {
+          const t = el.innerText.trim();
+          if (t.length > 2 && t.length < 200) return t;
+        }
+      }
+      // 回退：在 body 文本中找类目路径
+      const body = document.body.innerText;
+      const lines = body.split('\n');
+      for (const line of lines) {
+        const trimmed = line.trim();
+        // PDD 类目路径特征：包含 > 或 文具/数码/家居 等关键词
+        if (trimmed.includes('>') && trimmed.length < 100) {
+          if (/文具|数码|家居|服饰|母婴|食品/.test(trimmed)) return trimmed;
+        }
+      }
+      return null;
+    });
+
+    if (text) {
+      logger.info(`  Current selection: "${text}"`);
+    } else {
+      logger.warn('  Could not read selected category from page');
+    }
+    return text || '';
+  } catch (err) {
+    logger.warn(`  readSelectedCategory error: ${err.message}`);
+    return '';
+  }
+}
+
+/**
+ * 查找确认按钮 —— 严格匹配，排除干扰项
  */
 async function findConfirmButton(page) {
-  const candidates = [
-    '确认发布该类商品',
-    '确认发布此类商品',
-    '发布该类商品',
-    '确认',
-    '下一步',
-  ];
+  const allBtns = await page.evaluate(() => {
+    return [...document.querySelectorAll('button')]
+      .filter(b => b.offsetHeight > 0)
+      .map(b => ({
+        text: (b.innerText || '').trim(),
+        disabled: b.disabled || false,
+      }));
+  });
 
-  for (const text of candidates) {
-    const btn = page.locator(`button:has-text("${text}")`).first();
-    if (await btn.count() > 0) {
-      try {
-        const visible = await btn.isVisible();
-        if (visible) return { button: btn, text };
-      } catch { /* not visible */ }
+  logger.debug(`  Scanning ${allBtns.length} visible buttons for confirm...`);
+
+  // 先从允许列表中找
+  for (const ct of CONFIRM_TEXTS) {
+    const match = allBtns.find(b => b.text === ct && !b.disabled);
+    if (match) {
+      logger.debug(`  Found exact match: "${match.text}"`);
+
+      // 验证不是禁止的按钮
+      const isForbidden = FORBIDDEN_CONTAINS.some(f => match.text.includes(f));
+      if (isForbidden) {
+        logger.debug(`  Skipped forbidden button: "${match.text}"`);
+        continue;
+      }
+
+      return {
+        button: page.locator(`button:has-text("${ct}")`).first(),
+        text: match.text,
+      };
     }
   }
 
-  // 回退：用 JS 在页面中搜索
-  try {
-    const found = await page.evaluate(() => {
-      const btns = [...document.querySelectorAll('button')];
-      const match = btns.find(b => {
-        const t = b.innerText || '';
-        return t.includes('确认') || t.includes('发布');
-      });
-      return match ? match.innerText.trim() : null;
-    });
-    if (found) {
-      return { button: page.locator(`button:has-text("${found.substring(0, 8)}")`).first(), text: found };
+  // 再尝试包含匹配（更宽松）
+  for (const ct of CONFIRM_TEXTS) {
+    const match = allBtns.find(b =>
+      b.text.includes(ct) &&
+      !b.disabled &&
+      !FORBIDDEN_CONTAINS.some(f => b.text.includes(f))
+    );
+    if (match) {
+      logger.debug(`  Found partial match: "${match.text}"`);
+      return {
+        button: page.locator(`button:has-text("${ct.substring(0, 6)}")`).first(),
+        text: match.text,
+      };
     }
-  } catch { /* ignore */ }
+  }
 
+  logger.warn('  No confirm button found in visible buttons');
   return null;
 }
 
 /**
- * 人工辅助模式：等待用户手动选择类目
+ * 人工辅助模式
  */
-async function manualAssist(page) {
+async function manualAssist(page, expectedLeaf) {
   logger.info('');
   logger.info('╔══════════════════════════════════════════════╗');
   logger.info('║  MANUAL ASSIST — 请手动选择类目             ║');
-  logger.info('║  在浏览器中逐级点击：                        ║');
-  logger.info('║    数码电器                                  ║');
-  logger.info('║    文具电教/文化用品/商务用品                ║');
-  logger.info('║    纸张本册                                  ║');
-  logger.info('║    不干胶标签                                ║');
-  logger.info('║  选中后，按 Enter 继续                      ║');
+  logger.info(`║  目标: ... > ${expectedLeaf}                  ║`);
+  logger.info('║  请在浏览器中逐级点击选择正确类目            ║');
+  logger.info('║  选好后按 Enter 继续                        ║');
   logger.info('╚══════════════════════════════════════════════╝');
   logger.info('');
 
@@ -101,167 +173,209 @@ async function manualAssist(page) {
 
   await takeScreenshot(page, '03_manual_selection');
 
-  // 再找确认按钮
+  // 验证已选类目
+  const selected = await readSelectedCategory(page);
+  if (selected && (selected.includes(expectedLeaf) || expectedLeaf.includes(selected.split('>').pop()?.trim() || ''))) {
+    logger.info(`Category verified: "${selected}" includes "${expectedLeaf}" ✓`);
+  } else {
+    logger.warn(`Category may not be correct. Selected: "${selected}", expected leaf: "${expectedLeaf}"`);
+    logger.info('Proceeding anyway — please verify in the browser.');
+  }
+
+  // 找确认按钮
   const result = await findConfirmButton(page);
   if (result) {
-    logger.info(`Found confirm button: "${result.text}"`);
+    logger.info(`Clicking confirm: "${result.text}"`);
     await result.button.click();
     await page.waitForTimeout(3000);
     return true;
   }
 
-  logger.error('Still cannot find confirm button after manual selection');
-  await debugPageState(page, 'manual_after');
+  logger.error('Still cannot find confirm button');
+  await debugPageState(page, 'manual_failed');
   await takeScreenshot(page, '03_manual_failed');
   return false;
 }
 
 /**
+ * 在页面中点击匹配文本的元素（返回 true/false，不假成功）
+ */
+async function clickByText(page, text) {
+  // 先尝试 Playwright click
+  const exactLocator = page.locator(`text="${text}"`).first();
+  if (await exactLocator.count() > 0) {
+    try {
+      await exactLocator.click({ timeout: 5000 });
+      await page.waitForTimeout(800);
+      return true;
+    } catch { /* fall through to JS */ }
+  }
+
+  // 尝试部分匹配
+  const fuzzyLocator = page.locator(`text=${text}`).first();
+  if (await fuzzyLocator.count() > 0 && text.length > 2) {
+    try {
+      await fuzzyLocator.click({ timeout: 3000 });
+      await page.waitForTimeout(800);
+      return true;
+    } catch { /* fall through to JS */ }
+  }
+
+  // JS fallback —— 必须返回 true 才算成功
+  const jsResult = await page.evaluate((targetText) => {
+    // 精确匹配优先
+    const all = document.querySelectorAll('div, span, li, a, button, td, th, p');
+    for (const el of all) {
+      const t = (el.innerText || el.textContent || '').trim();
+      // 精确匹配
+      if (t === targetText) {
+        el.click();
+        return 'exact';
+      }
+    }
+    // 包含匹配
+    for (const el of all) {
+      const t = (el.innerText || el.textContent || '').trim();
+      if (t.includes(targetText) && t.length < targetText.length + 10) {
+        el.click();
+        return 'contains';
+      }
+    }
+    return false;
+  }, text);
+
+  if (jsResult) {
+    logger.debug(`  JS fallback matched: "${text}" (${jsResult})`);
+    await page.waitForTimeout(800);
+    return true;
+  }
+
+  return false;
+}
+
+/**
  * 选择商品类目并进入发布表单
- * @param {import('playwright').Page} page
- * @param {string[]} categoryPath - e.g. ['数码电器', '文具电教/...', '纸张本册', '不干胶标签']
  */
 async function selectCategory(page, categoryPath) {
-  logger.step(`Category path: ${categoryPath.join(' > ')}`);
+  const expectedLeaf = categoryPath[categoryPath.length - 1];
+  logger.step(`Category: ${categoryPath.join(' > ')}`);
 
   // ---- 进入分类页 ----
   await page.goto(config.urls.goodsList, { waitUntil: 'domcontentloaded' });
   await page.waitForTimeout(2000);
 
-  // 点击 "发布新商品"
   const publishLink = page.locator('a:has-text("发布新商品")').first();
   if (await publishLink.count() > 0) {
     await publishLink.click();
     logger.info('Clicked "发布新商品"');
     await page.waitForTimeout(2500);
   } else {
-    logger.info('Directly navigating to category page');
     await page.goto(config.urls.goodsCategory, { waitUntil: 'domcontentloaded' });
     await page.waitForTimeout(2500);
   }
 
-  await debugPageState(page, 'category_page_loaded');
+  await debugPageState(page, 'category_page');
   await takeScreenshot(page, '03_category_page');
 
-  // ---- 策略 A: 点击 "最近使用的分类" ----
-  let clicked = false;
+  // ---- 尝试 "最近使用的分类" ----
+  const recentCount = await page.locator('text=最近使用').count();
+  logger.info(`"最近使用" elements: ${recentCount}`);
 
-  // 用更宽松的方式判断：查找包含 "最近使用" 文本的可点击元素
-  const recentEls = page.locator('text=最近使用');
-  const recentCount = await recentEls.count();
-  logger.info(`"最近使用" elements found: ${recentCount}`);
+  let autoSelectOk = false;
 
   if (recentCount > 0) {
-    logger.step('Trying "最近使用的分类"...');
-
-    // 如果 "最近使用的分类" 下面有直接可点击的路径，点它
-    try {
-      const pathText = categoryPath.join(' > ');
-      const pathEl = page.locator(`text=${categoryPath[categoryPath.length - 1]}`).first();
-      if (await pathEl.count() > 0) {
-        await pathEl.click({ timeout: 3000 });
-        await page.waitForTimeout(500);
-        logger.info(`Clicked leaf category directly: ${categoryPath[categoryPath.length - 1]}`);
-        clicked = true;
-      }
-    } catch { /* continue */ }
-
-    // 如果直接点击叶子类目不行，尝试点击 ">" 符号展开
-    if (!clicked) {
-      try {
-        const expandBtn = page.locator('text=最近使用').locator('..').locator('[cursor=pointer]').first();
-        if (await expandBtn.count() > 0) {
-          await expandBtn.click();
-          await page.waitForTimeout(500);
-        }
-      } catch { /* ignore */ }
+    logger.step('Trying recent category...');
+    // 直接点击类目叶子节点
+    const leafClicked = await clickByText(page, expectedLeaf);
+    if (leafClicked) {
+      logger.info(`✓ Clicked recent leaf: "${expectedLeaf}"`);
+      autoSelectOk = true;
     }
   }
 
-  // ---- 策略 B: 逐级点击类目树 ----
-  if (!clicked) {
-    logger.step('Clicking through category tree level by level...');
+  // ---- 逐级点击 ----
+  if (!autoSelectOk) {
+    logger.step('Clicking tree level by level...');
 
+    let allLevelsClicked = true;
     for (let i = 0; i < categoryPath.length; i++) {
       const level = categoryPath[i];
-      logger.info(`  Level ${i + 1}: looking for "${level}"`);
+      logger.info(`  Level ${i + 1}/4: "${level}"`);
 
-      // 尝试直接点击
-      let levelClicked = false;
+      let clicked = false;
 
-      // 先尝试完整文本匹配
-      const fullMatch = page.locator(`text="${level}"`).first();
-      if (await fullMatch.count() > 0) {
-        try {
-          await fullMatch.click({ timeout: 5000 });
-          await page.waitForTimeout(800);
-          levelClicked = true;
-          logger.info(`  ✓ Clicked "${level}" (exact)`);
-        } catch { /* try partial */ }
-      }
-
-      // 尝试部分匹配（处理带 / 的路径如 "文具电教/文化用品/商务用品"）
-      if (!levelClicked && level.includes('/')) {
+      // 处理含 / 的路径（如 "文具电教/文化用品/商务用品"）
+      if (level.includes('/')) {
         for (const part of level.split('/')) {
           const trimmed = part.trim();
-          const partMatch = page.locator(`text=${trimmed}`).first();
-          if (await partMatch.count() > 0) {
-            try {
-              await partMatch.click({ timeout: 3000 });
-              await page.waitForTimeout(500);
-              logger.info(`  ✓ Clicked "${trimmed}" (partial)`);
-              levelClicked = true;
-            } catch { /* try next part */ }
+          const ok = await clickByText(page, trimmed);
+          if (ok) {
+            logger.info(`    ✓ Clicked "${trimmed}"`);
+            clicked = true;
+          } else {
+            logger.warn(`    ✗ Failed to click "${trimmed}"`);
           }
+          await page.waitForTimeout(300);
+        }
+      } else {
+        clicked = await clickByText(page, level);
+        if (clicked) {
+          logger.info(`    ✓ Clicked "${level}"`);
+        } else {
+          logger.warn(`    ✗ Failed to click "${level}"`);
         }
       }
 
-      // 如果还是点击失败，在页面中寻找包含这个文本的任意元素
-      if (!levelClicked) {
-        try {
-          await page.evaluate((text) => {
-            const all = document.querySelectorAll('*');
-            for (const el of all) {
-              if ((el.innerText || '').trim() === text || (el.innerText || '').includes(text)) {
-                el.click();
-                return true;
-              }
-            }
-            return false;
-          }, level);
-          await page.waitForTimeout(800);
-          logger.info(`  ✓ Clicked "${level}" (JS fallback)`);
-          levelClicked = true;
-        } catch { /* continue */ }
-      }
+      if (!clicked) allLevelsClicked = false;
 
-      if (!levelClicked) {
-        logger.warn(`  ✗ Could not click "${level}"`);
-      }
-
-      await takeScreenshot(page, `03_level_${i + 1}_${level.replace(/[/\\]/g, '_').substring(0, 20)}`);
+      await takeScreenshot(page, `03_level_${i + 1}`);
+      await page.waitForTimeout(300);
     }
 
-    await takeScreenshot(page, '03_category_selected');
+    if (allLevelsClicked) {
+      autoSelectOk = true;
+    }
   }
 
-  // ---- 确认发布 ----
+  // ---- 验证已选类目 ----
+  await page.waitForTimeout(500);
+  const selected = await readSelectedCategory(page);
+  const isCorrect = selected.includes(expectedLeaf) || expectedLeaf.includes(selected.split('>').pop()?.trim() || '');
+
+  if (isCorrect) {
+    logger.info(`Category verified ✓ — "${selected}"`);
+    autoSelectOk = true;
+  } else {
+    logger.warn(`Category mismatch! Selected: "${selected}", expected leaf: "${expectedLeaf}"`);
+    autoSelectOk = false;
+  }
+
+  // ---- 确认按钮 ----
   await debugPageState(page, 'before_confirm');
   let confirmResult = await findConfirmButton(page);
 
-  if (confirmResult) {
+  if (confirmResult && autoSelectOk && isCorrect) {
     logger.info(`Clicking confirm: "${confirmResult.text}"`);
+    await takeScreenshot(page, '03_category_selected');
     await confirmResult.button.click();
     await page.waitForTimeout(3000);
   } else {
-    // 自动选择失败 → 人工辅助
-    logger.warn('Auto-select failed, entering manual assist mode');
-    const manualOk = await manualAssist(page);
+    // 进入人工辅助
+    if (!autoSelectOk || !isCorrect) {
+      logger.warn('Auto category select failed or incorrect — entering manual assist');
+    } else {
+      logger.warn('No confirm button found — entering manual assist');
+    }
+
+    const manualOk = await manualAssist(page, expectedLeaf);
     if (!manualOk) {
       await debugPageState(page, 'final_failure');
+      await takeScreenshot(page, '03_final_failure');
       throw new Error(
-        'Cannot find any confirm button on the category page.\n' +
-        'Please manually verify the page in the Chrome window and check screenshots.'
+        'Category selection failed.\n' +
+        `Expected leaf: "${expectedLeaf}"\n` +
+        `Selected: "${selected}"\n` +
+        'Please check the Chrome window and screenshots in logs/screenshots/.'
       );
     }
   }
