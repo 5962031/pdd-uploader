@@ -1,84 +1,126 @@
 /**
- * 设置 SKU 规格 — 按标签文本定位规格块，在块内填值。失败即 throw。
+ * 设置 SKU 规格 — 只在当前规格块内部找控件，不扫全局 textbox
  */
 const config = require('../config');
 const logger = require('../helpers/logger');
 const { takeScreenshot } = require('../helpers/screenshot');
 
 /**
- * 在页面找包含 labelText 的文本块（div/span），返回其 y 坐标
+ * 在页面找到包含 labelText 的规格标签元素，返回其 DOM 位置
  */
-async function findLabelY(page, labelText) {
+async function findSpecBlockRoot(page, labelText) {
   return page.evaluate((name) => {
     const all = document.querySelectorAll('div, span, label, p');
     for (const el of all) {
       const r = el.getBoundingClientRect();
-      if (r.width < 10 || r.height < 8 || r.y < 200) continue;
+      if (r.width < 10 || r.height < 8) continue;
+      if (r.y < 200 || r.y > 3000) continue;
       const t = (el.innerText || el.textContent || '').trim();
-      if (t === name && t.length <= 6) return r.y + r.height / 2;
+      if (t === name && t.length <= 6) {
+        // 向上找最近的 spec 块容器
+        let container = el.parentElement;
+        for (let depth = 0; depth < 5 && container; depth++) {
+          const cr = container.getBoundingClientRect();
+          const cText = (container.innerText || '').trim();
+          if (cText.length > t.length + 3 && cText.includes(name) && cr.y > 0) {
+            return {
+              top: cr.y,
+              bottom: cr.y + cr.height,
+              left: cr.x,
+              found: true,
+            };
+          }
+          container = container.parentElement;
+        }
+        // 回退到元素自身
+        return { top: r.y, bottom: r.y + 200, left: r.x, found: true };
+      }
     }
-    // 回退：找下拉框里已显示的规格类型名（beast-core-select 的值）
+    // 回退: 找显示该值的选择器
     const selects = document.querySelectorAll('[data-testid="beast-core-select-htmlInput"]');
     for (const s of selects) {
-      const v = (s.value || '').trim();
-      if (v === name) { const r = s.getBoundingClientRect(); return r.y + r.height / 2; }
+      if ((s.value || '').trim() === name) {
+        const r = s.getBoundingClientRect();
+        return { top: r.y, bottom: r.y + 200, left: r.x, found: true };
+      }
     }
-    return null;
+    return { found: false };
   }, labelText);
 }
 
 /**
- * 在 specY 下方查找可填值的 textbox
+ * 在当前规格块内找空 textbox（通过 evaluate 在块内查询，不扫全局）
  */
-async function findInputInBlock(page, specY, specName) {
-  // 找到 specY 下方、同列的 textbox
-  const allTb = page.getByRole('textbox');
-  const count = await allTb.count();
-  const candidates = [];
+async function findAndFillInBlock(page, block, value) {
+  const result = await page.evaluate((b, v) => {
+    // 只找 block 区域内的 textbox
+    const inputs = document.querySelectorAll('[data-testid="beast-core-input-htmlInput"], input[type="text"], input:not([type])');
+    for (const inp of inputs) {
+      const r = inp.getBoundingClientRect();
+      if (r.width < 30 || r.height < 10) continue;
+      if (r.y < b.top || r.y > b.bottom) continue;  // 必须在 block 区域内
+      if (Math.abs(r.x - b.left) > 350) continue;     // x 不能差太远
 
-  for (let i = 0; i < count; i++) {
-    try {
-      const box = await allTb.nth(i).boundingBox();
-      if (!box || box.width < 30 || box.height < 10) continue;
-      // 在 specY 下方 150px 内
-      if (box.y > specY && box.y < specY + 150) {
-        const ph = await allTb.nth(i).getAttribute('placeholder').catch(() => '');
-        const val = await allTb.nth(i).inputValue().catch(() => '');
-        // 排除规格类型选择框
-        if (ph.includes('规格类型') || ph.includes('搜索分类') || ph.includes('搜索功能')) continue;
-        candidates.push({ idx: i, y: box.y, ph, val, locator: allTb.nth(i) });
+      // 排除规格类型选择框
+      if ((inp.placeholder || '').includes('规格类型')) continue;
+
+      const val = inp.value || '';
+      if (val === '' || val === '请输入规格名称' || val === '请输入') {
+        // 找到了！用原生 setter 设值
+        const desc = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
+        desc.set.call(inp, v);
+        inp.dispatchEvent(new Event('input', { bubbles: true }));
+        inp.dispatchEvent(new Event('change', { bubbles: true }));
+        return { filled: true, at: r.y };
       }
-    } catch {}
-  }
+    }
+    return { filled: false };
+  }, block, value);
 
-  if (candidates.length === 0) {
-    logger.error(`  ✗ Cannot find value input below "${specName}" (y=${specY.toFixed(0)})`);
-    logger.debug(`     Total textboxes on page: ${count}`);
-    return null;
-  }
-
-  // 返回最近的一个（y 最接近 specY）
-  candidates.sort((a, b) => a.y - b.y);
-  const found = candidates[0];
-  logger.info(`  Value input for "${specName}" found at y=${found.y.toFixed(0)}`);
-  return found;
+  return result?.filled || false;
 }
 
 /**
- * 在 specY 下方找"添加定制规格"按钮
+ * 在当前规格块内找"添加定制规格"按钮并点击
  */
-async function findAddBtnInBlock(page, specY, specName) {
+async function clickAddInBlock(page, block) {
   try {
-    const btns = page.locator('a, button, [class*="add"], [class*="添加"]');
-    const cnt = await btns.count();
-    for (let i = 0; i < cnt; i++) {
-      const box = await btns.nth(i).boundingBox();
-      if (box && box.y > specY && box.y < specY + 150 && box.width > 20) {
-        return btns.nth(i);
+    return await page.evaluate((b) => {
+      const btns = document.querySelectorAll('a, button, [class*="add"], [class*="添加"]');
+      for (const btn of btns) {
+        const r = btn.getBoundingClientRect();
+        if (r.width < 10 || r.height < 8) continue;
+        if (r.y < b.top || r.y > b.bottom) continue;
+        btn.click();
+        return true;
       }
+      return false;
+    }, block);
+  } catch { return false; }
+}
+
+/**
+ * 校验当前规格块内的值
+ */
+async function verifyBlockValues(page, block, expectedValues) {
+  const result = await page.evaluate((b) => {
+    const inputs = document.querySelectorAll('[data-testid="beast-core-input-htmlInput"], input[type="text"], input:not([type])');
+    const vals = [];
+    for (const inp of inputs) {
+      const r = inp.getBoundingClientRect();
+      if (r.width < 30 || r.height < 10) continue;
+      if (r.y < b.top || r.y > b.bottom) continue;
+      if (Math.abs(r.x - b.left) > 350) continue;
+      if ((inp.placeholder || '').includes('规格类型')) continue;
+      const v = (inp.value || '').trim();
+      if (v && v !== '请输入规格名称' && v !== '请输入') vals.push(v);
     }
-  } catch {}
-  return null;
+    return vals;
+  }, block);
+
+  const allFound = expectedValues.every(v => result.includes(v));
+  const noExtra = result.every(v => expectedValues.includes(v));
+  return { ok: allFound && noExtra, actual: result };
 }
 
 /**
@@ -125,69 +167,45 @@ async function fillSpecifications(page, product) {
   }
   await page.waitForTimeout(300);
 
-  // 逐个维度填值
+  // 逐个维度
   for (const dim of dimensions) {
     logger.info(`  Spec: ${dim.name} → [${dim.values.join(', ')}]`);
 
-    // 找到这个规格名的 y 位置
-    const specY = await findLabelY(page, dim.name);
-    if (specY === null) {
-      await takeScreenshot(page, `08_spec_label_${dim.name}`);
-      throw new Error(`Cannot find spec label "${dim.name}" on page`);
+    // 找到规格块
+    const block = await findSpecBlockRoot(page, dim.name);
+    if (!block.found) {
+      await takeScreenshot(page, `08_spec_block_${dim.name}`);
+      throw new Error(`Spec block "${dim.name}" not found on page`);
     }
-    logger.info(`  Spec block "${dim.name}" found at y=${specY.toFixed(0)}`);
+    logger.info(`  Spec block "${dim.name}" top=${block.top.toFixed(0)} bottom=${block.bottom.toFixed(0)}`);
 
-    // 填值：逐个填入
+    // 逐个填值
     for (let vi = 0; vi < dim.values.length; vi++) {
-      // 第一个值之后，点"添加定制规格"
       if (vi > 0) {
-        const addBtn = await findAddBtnInBlock(page, specY, dim.name);
-        if (addBtn) {
-          await addBtn.click();
+        const added = await clickAddInBlock(page, block);
+        if (added) {
           await page.waitForTimeout(400);
-          logger.info(`  Clicked add value inside "${dim.name}" block`);
-        } else {
-          logger.warn(`  ⚠ Cannot find add button for "${dim.name}" value ${vi + 1}`);
+          logger.info(`  Clicked add value in "${dim.name}" block`);
         }
       }
 
-      // 找该 block 内的空 textbox
-      const input = await findInputInBlock(page, specY, dim.name);
-      if (!input) {
+      const filled = await findAndFillInBlock(page, block, dim.values[vi]);
+      if (!filled) {
         await takeScreenshot(page, `08_spec_noinput_${dim.name}`);
         throw new Error(`Cannot find value input inside spec block: "${dim.name}"`);
       }
-
-      await input.locator.fill(dim.values[vi]);
       await page.waitForTimeout(config.timeouts.reactRerender);
       logger.info(`  Filled "${dim.name}": "${dim.values[vi]}"`);
     }
 
     // 校验
-    const verifyInput = await findInputInBlock(page, specY, dim.name);
-    if (verifyInput) {
-      const actualVals = [];
-      // 读取该 block 内所有 textbox 的值
-      const allTb = page.getByRole('textbox');
-      const tbCount = await allTb.count();
-      for (let i = 0; i < tbCount; i++) {
-        try {
-          const box = await allTb.nth(i).boundingBox();
-          if (!box || box.y < specY || box.y > specY + 150) continue;
-          const ph = await allTb.nth(i).getAttribute('placeholder').catch(() => '');
-          if (ph.includes('规格类型') || ph.includes('搜索')) continue;
-          const v = await allTb.nth(i).inputValue().catch(() => '');
-          if (v && v !== '请输入规格名称' && v !== '请输入') actualVals.push(v);
-        } catch {}
-      }
-      const allOk = dim.values.every(v => actualVals.includes(v));
-      if (allOk) {
-        logger.info(`  ✓ "${dim.name}" verified: ${JSON.stringify(actualVals)}`);
-      } else {
-        logger.error(`  ✗ "${dim.name}" MISMATCH: expected=${JSON.stringify(dim.values)} actual=${JSON.stringify(actualVals)}`);
-        await takeScreenshot(page, `08_spec_mismatch_${dim.name}`);
-        throw new Error(`Spec "${dim.name}" verification failed`);
-      }
+    const verify = await verifyBlockValues(page, block, dim.values);
+    if (verify.ok) {
+      logger.info(`  ✓ "${dim.name}" verified: ${JSON.stringify(verify.actual)}`);
+    } else {
+      logger.error(`  ✗ "${dim.name}" MISMATCH: expected=${JSON.stringify(dim.values)} actual=${JSON.stringify(verify.actual)}`);
+      await takeScreenshot(page, `08_spec_mismatch_${dim.name}`);
+      throw new Error(`Spec "${dim.name}" verification failed`);
     }
   }
 
