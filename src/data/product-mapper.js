@@ -214,10 +214,14 @@ function extractDimensions(productRow, skuSheet, productId) {
   const sources = [];
 
   // 动态读取 products 表的 sku_N_name / sku_N_values
+  // 严格匹配 sku_N_name 字段（排除 sku_N_values 和其他类似字段）
   for (let n = 1; n <= 3; n++) {
-    const name = productRow[`sku_${n}_name`];
-    const valuesRaw = productRow[`sku_${n}_values`];
-    if (name && String(name).trim() !== '') {
+    const nameKey = `sku_${n}_name`;
+    const valuesKey = `sku_${n}_values`;
+    const name = productRow[nameKey];
+    const valuesRaw = productRow[valuesKey];
+    // 只有当 name 字段存在且非空才算
+    if (name && String(name).trim() !== '' && nameKey in productRow) {
       const values = String(valuesRaw || '')
         .split(/[;；]/).map(s => s.trim()).filter(Boolean);
       if (values.length > 0) {
@@ -226,8 +230,15 @@ function extractDimensions(productRow, skuSheet, productId) {
       }
     }
   }
+  // 清除任何意外被当作维度的 values 字符串
+  const valueLike = /^[一-鿿\w]+(?:[;；][一-鿿\w]+)+$/;
+  const filtered = dims.filter(d => !valueLike.test(d.name) || d.name.length < 10);
+  if (filtered.length !== dims.length) {
+    logger.warn(`  Filtered ${dims.length - filtered.length} false dimension(s)`);
+  }
 
   // 如果 products 表有定义，直接返回
+  dims.length = 0; dims.push(...filtered);
   if (dims.length > 0) {
     logger.info(`  SKU dims from products sheet: ${dims.map(d => d.name + '(' + d.values.length + ')').join(', ')}`);
     return dims;

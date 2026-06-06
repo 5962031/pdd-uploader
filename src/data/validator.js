@@ -105,9 +105,9 @@ function validateSkuRows(skuRows) {
     if (!row.stock || isNaN(Number(row.stock)) || Number(row.stock) <= 0) {
       errors.push({ field: 'skuRows', message: `SKU行${i + 1} 库存无效: "${row.stock}"`, level: 'warn' });
     }
-    // 单买价应 >= 拼单价
+    // 单买价应 >= 拼单价（warn，不阻止）
     if (Number(row.singlePrice) < Number(row.groupPrice)) {
-      errors.push({ field: 'skuRows', message: `SKU行${i + 1} 单买价${row.singlePrice}低于拼单价${row.groupPrice}`, level: 'error' });
+      errors.push({ field: 'skuRows', message: `SKU行${i + 1} 单买价${row.singlePrice}低于拼单价${row.groupPrice}（可能数据列错位）`, level: 'warn' });
     }
   }
 
