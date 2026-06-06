@@ -1,44 +1,27 @@
 /**
- * 设置 SKU 规格 — 只在当前规格块内部找控件，不扫全局 textbox
+ * 填规格值 — 逐个值输入 + key事件 + 等新input出现 + 校验
  */
 const config = require('../config');
 const logger = require('../helpers/logger');
 const { takeScreenshot } = require('../helpers/screenshot');
 
-/**
- * 在页面找到包含 labelText 的规格标签元素，返回其 DOM 位置
- */
 async function findSpecBlockRoot(page, labelText) {
   return page.evaluate((name) => {
     const all = document.querySelectorAll('div, span, label, p');
     for (const el of all) {
       const r = el.getBoundingClientRect();
-      if (r.width < 10 || r.height < 8) continue;
-      if (r.y < 200 || r.y > 3000) continue;
-      const t = (el.innerText || el.textContent || '').trim();
-      if (t === name && t.length <= 6) {
-        // 向上找最近的 spec 块容器
-        let container = el.parentElement;
-        for (let depth = 0; depth < 5 && container; depth++) {
-          const cr = container.getBoundingClientRect();
-          const cText = (container.innerText || '').trim();
-          if (cText.length > t.length + 3 && cText.includes(name) && cr.y > 0) {
-            return {
-              top: cr.y,
-              bottom: cr.y + cr.height,
-              left: cr.x,
-              found: true,
-            };
-          }
-          container = container.parentElement;
+      if (r.width < 10 || r.height < 8 || r.y < 200 || r.y > 3000) continue;
+      if ((el.innerText || el.textContent || '').trim() === name && name.length <= 6) {
+        let c = el.parentElement;
+        for (let d = 0; d < 5 && c; d++) {
+          const cr = c.getBoundingClientRect();
+          if ((c.innerText || '').includes(name) && cr.y > 0) return { top: cr.y, bottom: cr.y + cr.height, left: cr.x, found: true };
+          c = c.parentElement;
         }
-        // 回退到元素自身
         return { top: r.y, bottom: r.y + 200, left: r.x, found: true };
       }
     }
-    // 回退: 找显示该值的选择器
-    const selects = document.querySelectorAll('[data-testid="beast-core-select-htmlInput"]');
-    for (const s of selects) {
+    for (const s of document.querySelectorAll('[data-testid="beast-core-select-htmlInput"]')) {
       if ((s.value || '').trim() === name) {
         const r = s.getBoundingClientRect();
         return { top: r.y, bottom: r.y + 200, left: r.x, found: true };
@@ -48,82 +31,66 @@ async function findSpecBlockRoot(page, labelText) {
   }, labelText);
 }
 
-/**
- * 在当前规格块内找空 textbox（通过 evaluate 在块内查询，不扫全局）
- */
-async function findAndFillInBlock(page, block, value) {
-  const result = await page.evaluate((args) => {
-    const b = args.block;
-    const v = args.value;
-    // 只找 block 区域内的 textbox
-    const inputs = document.querySelectorAll('[data-testid="beast-core-input-htmlInput"], input[type="text"], input:not([type])');
-    for (const inp of inputs) {
-      const r = inp.getBoundingClientRect();
-      if (r.width < 30 || r.height < 10) continue;
-      if (r.y < b.top || r.y > b.bottom) continue;
-      if (Math.abs(r.x - b.left) > 350) continue;
-      if ((inp.placeholder || '').includes('规格类型')) continue;
-      const val = inp.value || '';
-      if (val === '' || val === '请输入规格名称' || val === '请输入') {
-        const desc = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
-        desc.set.call(inp, v);
-        inp.dispatchEvent(new Event('input', { bubbles: true }));
-        inp.dispatchEvent(new Event('change', { bubbles: true }));
-        return { filled: true, at: r.y };
-      }
-    }
-    return { filled: false };
-  }, { block, value });
-
-  return result?.filled || false;
-}
-
-/**
- * 在当前规格块内找"添加定制规格"按钮并点击
- */
-async function clickAddInBlock(page, block) {
-  try {
-    return await page.evaluate((b) => {
-      const btns = document.querySelectorAll('a, button, [class*="add"], [class*="添加"]');
-      for (const btn of btns) {
-        const r = btn.getBoundingClientRect();
-        if (r.width < 10 || r.height < 8) continue;
-        if (r.y < b.top || r.y > b.bottom) continue;
-        btn.click();
-        return true;
-      }
-      return false;
-    }, block);
-  } catch { return false; }
-}
-
-/**
- * 校验当前规格块内的值
- */
-async function verifyBlockValues(page, block, expectedValues) {
-  const result = await page.evaluate((b) => {
-    const inputs = document.querySelectorAll('[data-testid="beast-core-input-htmlInput"], input[type="text"], input:not([type])');
+async function readBlockValues(page, block) {
+  return page.evaluate((b) => {
     const vals = [];
+    const inputs = document.querySelectorAll('[data-testid="beast-core-input-htmlInput"], input[type="text"], input:not([type])');
     for (const inp of inputs) {
       const r = inp.getBoundingClientRect();
-      if (r.width < 30 || r.height < 10) continue;
+      if (r.width < 20 || r.height < 8) continue;
       if (r.y < b.top || r.y > b.bottom) continue;
       if (Math.abs(r.x - b.left) > 350) continue;
-      if ((inp.placeholder || '').includes('规格类型')) continue;
+      const ph = (inp.placeholder || '');
+      if (ph.includes('规格类型') || ph.includes('搜索')) continue;
       const v = (inp.value || '').trim();
       if (v && v !== '请输入规格名称' && v !== '请输入') vals.push(v);
     }
     return vals;
   }, block);
-
-  const allFound = expectedValues.every(v => result.includes(v));
-  const noExtra = result.every(v => expectedValues.includes(v));
-  return { ok: allFound && noExtra, actual: result };
 }
 
-/**
- * 添加规格类型
- */
+async function clickAddInBlock(page, block) {
+  return page.evaluate((b) => {
+    const btns = document.querySelectorAll('a, button, [class*="add"], [class*="添加"]');
+    for (const btn of btns) {
+      const r = btn.getBoundingClientRect();
+      if (r.width < 8 || r.height < 6) continue;
+      if (r.y < b.top || r.y > b.bottom) continue;
+      btn.click();
+      return true;
+    }
+    return false;
+  }, block);
+}
+
+async function fillOneValueInBlock(page, block, value) {
+  return page.evaluate((args) => {
+    const b = args.block;
+    const v = args.value;
+    const inputs = document.querySelectorAll('[data-testid="beast-core-input-htmlInput"], input[type="text"], input:not([type])');
+    for (const inp of inputs) {
+      const r = inp.getBoundingClientRect();
+      if (r.width < 20 || r.height < 8) continue;
+      if (r.y < b.top || r.y > b.bottom) continue;
+      if (Math.abs(r.x - b.left) > 350) continue;
+      if ((inp.placeholder || '').includes('规格类型') || (inp.placeholder || '').includes('搜索')) continue;
+
+      const cur = (inp.value || '').trim();
+      if (cur === '' || cur === '请输入规格名称' || cur === '请输入') {
+        const d = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
+        d.set.call(inp, v);
+        inp.dispatchEvent(new Event('input', { bubbles: true, cancelable: true }));
+        inp.dispatchEvent(new Event('change', { bubbles: true, cancelable: true }));
+        inp.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
+        inp.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
+        inp.dispatchEvent(new FocusEvent('blur', { bubbles: true }));
+        return { filled: true };
+      }
+    }
+    return { filled: false };
+  }, { block, value });
+}
+
 async function addSpecType(page, specName, specIndex) {
   const addBtn = page.locator(config.selectors.spec.addSpecBtn);
   if (await addBtn.count() === 0) return false;
@@ -138,89 +105,101 @@ async function addSpecType(page, specName, specIndex) {
   try { await inp.fill(specName); await page.waitForTimeout(300); return true; } catch { return false; }
 }
 
-/**
- * 主入口
- */
+async function countSkuRows(page) {
+  try {
+    return await page.evaluate(() => {
+      let n = 0;
+      document.querySelectorAll('input[placeholder="请输入"]').forEach(inp => {
+        if (inp.getBoundingClientRect().width > 50) n++;
+      });
+      return Math.floor(n / 3);
+    });
+  } catch { return 0; }
+}
+
 async function fillSpecifications(page, product) {
   logger.step('=== Filling SKU Specifications ===');
-
-  await page.evaluate(() => {
-    const el = document.querySelector('table, [class*="sku"], [class*="spec"]');
-    if (el) el.scrollIntoView({ block: 'center' });
-  });
+  await page.evaluate(() => { const e = document.querySelector('table, [class*="sku"]'); if (e) e.scrollIntoView({ block: 'center' }); });
   await page.waitForTimeout(500);
 
-  const dimensions = product.skuDimensions;
-  if (dimensions.length === 0) { logger.info('No SKU dimensions'); return; }
-
-  logger.info(`Dimensions (${dimensions.length}): ${dimensions.map(d => d.name + '(' + d.values.length + ')').join(', ')}`);
+  const dims = product.skuDimensions;
+  if (dims.length === 0) { logger.info('No SKU dimensions'); return; }
+  logger.info(`Dimensions: ${dims.map(d => d.name + '(' + d.values.length + ')').join(', ')}`);
 
   // 确保规格类型存在
-  for (let i = 0; i < dimensions.length; i++) {
-    const specInput = page.getByRole('textbox', { name: `规格类型${i + 1}` });
-    if (await specInput.count() === 0) {
-      const added = await addSpecType(page, dimensions[i].name, i + 1);
-      if (!added) logger.warn(`Could not add spec type "${dimensions[i].name}"`);
-    }
+  for (let i = 0; i < dims.length; i++) {
+    const si = page.getByRole('textbox', { name: `规格类型${i + 1}` });
+    if (await si.count() === 0) { const ok = await addSpecType(page, dims[i].name, i + 1); if (!ok) logger.warn(`Add spec "${dims[i].name}" failed`); }
   }
   await page.waitForTimeout(300);
 
   // 逐个维度
-  for (const dim of dimensions) {
+  for (const dim of dims) {
     logger.info(`  Spec: ${dim.name} → [${dim.values.join(', ')}]`);
-
-    // 找到规格块
     const block = await findSpecBlockRoot(page, dim.name);
-    if (!block.found) {
-      await takeScreenshot(page, `08_spec_block_${dim.name}`);
-      throw new Error(`Spec block "${dim.name}" not found on page`);
-    }
-    logger.info(`  Spec block "${dim.name}" top=${block.top.toFixed(0)} bottom=${block.bottom.toFixed(0)}`);
+    if (!block.found) { await takeScreenshot(page, `08_spec_block_${dim.name}`); throw new Error(`Spec block "${dim.name}" not found`); }
+    logger.info(`  Block "${dim.name}" top=${block.top.toFixed(0)} bottom=${block.bottom.toFixed(0)}`);
 
-    // 逐个填值
+    // 逐个值
+    let beforeVals = await readBlockValues(page, block);
+    logger.info(`  Before fill: ${JSON.stringify(beforeVals)}`);
+
     for (let vi = 0; vi < dim.values.length; vi++) {
       if (vi > 0) {
-        const added = await clickAddInBlock(page, block);
-        if (added) {
-          await page.waitForTimeout(400);
-          logger.info(`  Clicked add value in "${dim.name}" block`);
+        const clicked = await clickAddInBlock(page, block);
+        if (clicked) {
+          await page.waitForTimeout(500);
+          logger.info(`  Clicked add in "${dim.name}" block`);
         }
       }
 
-      const filled = await findAndFillInBlock(page, block, dim.values[vi]);
-      if (!filled) {
-        await takeScreenshot(page, `08_spec_noinput_${dim.name}`);
-        throw new Error(`Cannot find value input inside spec block: "${dim.name}"`);
+      const filled = await fillOneValueInBlock(page, block, dim.values[vi]);
+      if (!filled) { await takeScreenshot(page, `08_noinput_${dim.name}`); throw new Error(`Cannot fill value in "${dim.name}" block`); }
+
+      // 点空白处触发提交
+      await page.mouse.click(block.left + 10, block.top - 20);
+      await page.waitForTimeout(400);
+
+      const afterVals = await readBlockValues(page, block);
+      logger.info(`  After "${dim.values[vi]}": ${JSON.stringify(afterVals)}`);
+
+      if (!afterVals.includes(dim.values[vi])) {
+        await takeScreenshot(page, `08_nocommit_${dim.name}`);
+        throw new Error(`Value "${dim.values[vi]}" not committed in "${dim.name}" block`);
       }
-      await page.waitForTimeout(config.timeouts.reactRerender);
-      logger.info(`  Filled "${dim.name}": "${dim.values[vi]}"`);
     }
 
-    // 校验
-    const verify = await verifyBlockValues(page, block, dim.values);
-    if (verify.ok) {
-      logger.info(`  ✓ "${dim.name}" verified: ${JSON.stringify(verify.actual)}`);
+    // 最终校验
+    const finalVals = await readBlockValues(page, block);
+    const ok = dim.values.every(v => finalVals.includes(v));
+    if (ok) {
+      logger.info(`  ✓ "${dim.name}" OK: ${JSON.stringify(finalVals)}`);
     } else {
-      logger.error(`  ✗ "${dim.name}" MISMATCH: expected=${JSON.stringify(dim.values)} actual=${JSON.stringify(verify.actual)}`);
-      await takeScreenshot(page, `08_spec_mismatch_${dim.name}`);
-      throw new Error(`Spec "${dim.name}" verification failed`);
+      logger.error(`  ✗ "${dim.name}" FAIL: expected=${JSON.stringify(dim.values)} actual=${JSON.stringify(finalVals)}`);
+      await takeScreenshot(page, `08_fail_${dim.name}`);
+      throw new Error(`Spec "${dim.name}" wrong values`);
     }
   }
 
   await takeScreenshot(page, '08_specs_done');
 
-  // 校验 SKU 行数
-  const skuRows = product.skuRows;
-  const rows = page.locator('tr');
-  let enabledCount = 0;
-  for (let i = 0; i < await rows.count(); i++) {
-    if ((await rows.nth(i).innerText()).includes('已启用')) enabledCount++;
+  // 关闭下拉 + 等 SKU 表刷新
+  await page.keyboard.press('Escape');
+  await page.mouse.click(200, 200);
+  await page.waitForTimeout(500);
+
+  const expected = product.skuRows.length;
+  let rows = await countSkuRows(page);
+  logger.info(`SKU rows after fill: ${rows} (expected ${expected})`);
+  for (let a = 0; a < 15 && rows < expected; a++) {
+    await page.waitForTimeout(500);
+    rows = await countSkuRows(page);
   }
-  if (enabledCount !== skuRows.length) {
-    await takeScreenshot(page, '08_sku_row_mismatch');
-    throw new Error(`SKU row count mismatch: page has ${enabledCount}, Excel has ${skuRows.length}`);
+  if (rows !== expected) {
+    await takeScreenshot(page, '08_sku_rows');
+    throw new Error(`SKU row count: page=${rows} excel=${expected}`);
   }
-  logger.info(`SKU rows: ${enabledCount}/${skuRows.length} ✓`);
+  logger.info(`SKU rows: ${rows}/${expected} ✓`);
 }
 
 module.exports = { fillSpecifications };
