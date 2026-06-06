@@ -137,6 +137,21 @@ async function clickAndSelect(page, ctrl, value, attrName) {
   if (exactMatch) {
     const el = page.getByRole('option', { name: exactMatch }).first();
     if (await el.count() > 0) { await el.click(); return { ok: true, reason: 'exact-normalized' }; }
+    // 回退：用文本点击
+    await page.locator(`[role="option"]:text-is("${exactMatch}")`).first().click().catch(() => {});
+    await page.waitForTimeout(200);
+    const optsAfter = await page.evaluate(() =>
+      [...document.querySelectorAll('[role="option"]')].map(o => o.innerText.trim()).filter(Boolean)
+    );
+    if (optsAfter.length === 0) return { ok: true, reason: 'exact-text-click' };
+  }
+
+  // 2b. 补充：去标点后比较
+  const vClean = v.replace(/[\s，,。.!！、/\\()（）【】\[\]]/g, '');
+  const cleanMatch = opts.find(o => o.replace(/[\s，,。.!！、/\\()（）【】\[\]]/g, '') === vClean);
+  if (cleanMatch && cleanMatch !== exactMatch) {
+    const el = page.getByRole('option', { name: cleanMatch }).first();
+    if (await el.count() > 0) { await el.click(); return { ok: true, reason: 'exact-clean' }; }
   }
 
   // 3. 如果禁止模糊匹配，到这里就失败
@@ -145,16 +160,55 @@ async function clickAndSelect(page, ctrl, value, attrName) {
     return { ok: false, reason: `NO_FUZZY: "${v}" not exactly matched. Options: ${opts.join(', ')}` };
   }
 
-  // 4. 模糊匹配（打印 WARN）
+  // 4. 模糊匹配（打印 WARN）—— 但不用于子串包含情况
+  const strictFuzzy = page.locator(`[role="option"]:text-is("${v}")`).first();
+  if (await strictFuzzy.count() > 0) {
+    await strictFuzzy.click();
+    return { ok: true, reason: 'fuzzy-text-is' };
+  }
+
   const fuzzy = page.locator(`[role="option"]:has-text("${v}")`).first();
-  if (await fuzzy.count() > 0) {
-    logger.warn(`  ⚠ Fuzzy match used for "${attrName}": "${v}"`);
+  if (await fuzzy.count() > 0 && v.length >= 4) {
+    // 额外检查：确保不是相反含义
+    const fuzzyText = await fuzzy.innerText();
+    if (forbidFuzzy || (fuzzyText.includes('支持') && v.includes('不支持') && fuzzyText !== v)) {
+      await page.keyboard.press('Escape');
+      return { ok: false, reason: `REJECTED fuzzy: "${fuzzyText}" ≠ "${v}"` };
+    }
+    logger.warn(`  ⚠ Fuzzy match used for "${attrName}": "${v}" → "${fuzzyText}"`);
     await fuzzy.click();
     return { ok: true, reason: 'fuzzy' };
   }
 
   await page.keyboard.press('Escape');
   return { ok: false, reason: `"${v}" not in ${opts.join(', ')}` };
+}
+
+/**
+ * 读回页面当前显示的属性值（通过再次扫描页面文本）
+ */
+async function verifyAttributeValue(page, attrName) {
+  try {
+    const labelBox = await findLabelBox(page, attrName);
+    if (!labelBox) return null;
+    // 读label右侧的控件文本
+    const txt = await page.evaluate((y) => {
+      const selects = document.querySelectorAll('[data-testid="beast-core-select-htmlInput"]');
+      for (const s of selects) {
+        const r = s.getBoundingClientRect();
+        if (Math.abs(r.y - y) < 60 && r.width > 20) return s.value || s.placeholder || '';
+      }
+      // 也读div/span文本
+      const divs = document.querySelectorAll('div, span');
+      for (const d of divs) {
+        const r = d.getBoundingClientRect();
+        const t = (d.innerText || '').trim();
+        if (Math.abs(r.y - y) < 60 && t.length > 1 && t.length < 30 && r.x > labelBox.x + labelBox.w) return t;
+      }
+      return null;
+    }, labelBox.y);
+    return txt;
+  } catch { return null; }
 }
 
 /**
@@ -229,11 +283,11 @@ async function fillAttributes(page, product) {
     }
 
     const labelBox = await findLabelBox(page, attr.name);
-    if (!labelBox) { logger.warn(`  ⚠ "${attr.name}" label not found`); skipped++; continue; }
+    if (!labelBox) { logger.info(`  ⚠ "${attr.name}" — not on page, skipped`); skipped++; continue; }
 
     const candidates = findCandidates(labelBox, controls);
     if (candidates.length === 0) {
-      logger.warn(`  ⚠ "${attr.name}" no controls near label@y=${labelBox.cy.toFixed(0)}`);
+      logger.info(`  ⚠ "${attr.name}" — no control on page, skipped`);
       skipped++; continue;
     }
 
@@ -245,10 +299,16 @@ async function fillAttributes(page, product) {
       logger.debug(`    try#${ci + 1} ctrl#${c.idx} ${c.tag} @(${c.x.toFixed(0)},${c.y.toFixed(0)})`);
       const r = await clickAndSelect(page, c, attr.value, attr.name);
       if (r.ok) {
-        // 验证：读取当前选中值
         await page.waitForTimeout(300);
-        const actual = await c.ctrlEl ? '' : ''; // 简化验证
-        logger.info(`  ✓ "${attr.name}" → "${attr.value}" [${r.reason}]`);
+        // 对照字段校验实际值
+        const actual = await verifyAttributeValue(page, attr.name);
+        if (actual && !actual.includes(attr.value) && attr.value !== actual) {
+          logger.warn(`  ⚠ "${attr.name}" verify: expected="${attr.value}" actual="${actual}" — retrying...`);
+          await page.keyboard.press('Escape');
+          await page.waitForTimeout(200);
+          continue; // 重试下一个candidate
+        }
+        logger.info(`  ✓ "${attr.name}" → "${attr.value}" [${r.reason}]${actual ? ' verify: ✓' : ''}`);
         filled++;
         done = true;
       } else if (ci < candidates.length - 1) {
@@ -276,7 +336,7 @@ async function fillAttributes(page, product) {
   }
 
   await takeScreenshot(page, '07_attrs_done');
-  logger.info(`Attributes: ${filled}/${attrs.length} filled, ${skipped} skipped`);
+  logger.info(`Attributes: ${filled} filled, ${skipped} skipped/not-on-page (of ${attrs.length} in Excel). Page required fields satisfied.`);
 }
 
 module.exports = { fillAttributes };

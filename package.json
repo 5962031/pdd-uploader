@@ -8,6 +8,7 @@
     "run": "node src/index.js",
     "batch": "node src/index.js --batch",
     "run:label": "node src/index.js --product=label_001",
+    "batch:draft": "node src/index.js --batch-draft",
     "publish": "node src/index.js --publish",
     "inspect": "node src/inspect.js"
   },

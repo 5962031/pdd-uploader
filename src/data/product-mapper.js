@@ -8,11 +8,34 @@ const logger = require('../helpers/logger');
 
 /**
  * 解析产品图片基础目录
+ *
+ * @param {string} productId - 程序内部编号
+ * @param {string} assetDirOverride - products 表的 asset_dir 字段（优先）
+ * @returns {{ imageDir: string, displayName: string }|null}
  */
-function findImageDir(productId) {
-  const assetDir = path.join(config.paths.assets, productId);
-  if (fs.existsSync(assetDir)) return assetDir;
-  if (fs.existsSync(config.paths.labels)) return config.paths.labels;
+function findImageDir(productId, assetDirOverride) {
+  // 优先使用 asset_dir
+  if (assetDirOverride && String(assetDirOverride).trim() !== '') {
+    const raw = String(assetDirOverride).trim();
+    // 绝对路径直接使用，相对路径拼到 assets/ 下
+    const dir = path.isAbsolute(raw) ? raw : path.join(config.paths.assets, raw);
+    if (fs.existsSync(dir)) {
+      return { imageDir: dir, displayName: raw };
+    }
+    logger.warn(`  asset_dir "${raw}" not found (${dir}), falling back to product_id`);
+  }
+
+  // 回退到 product_id
+  const productDir = path.join(config.paths.assets, productId);
+  if (fs.existsSync(productDir)) {
+    return { imageDir: productDir, displayName: productId };
+  }
+
+  // 最后回退到标签目录
+  if (fs.existsSync(config.paths.labels)) {
+    return { imageDir: config.paths.labels, displayName: 'labels' };
+  }
+
   return null;
 }
 
@@ -123,21 +146,47 @@ function resolveSkuPreviewPath(imageDir, previewFile) {
 
   // 按优先级查找: SKU图/ → sku/ → 根目录
   for (const folderName of ['SKU图', 'sku']) {
-    const subFile = path.join(imageDir, folderName, basename);
-    if (fs.existsSync(subFile)) {
+    const folderPath = path.join(imageDir, folderName);
+    const subFile = path.join(folderPath, basename);
+
+    // 精确文件名匹配
+    if (basename && fs.existsSync(subFile)) {
       logger.info(`  SKU preview: ${folderName}/${basename} ✓`);
       return subFile;
+    }
+
+    // 特殊：previewFile 是文件夹名（如 "SKU图"）或为空 → 取文件夹第一张图
+    if (!basename || basename === 'SKU图' || basename === 'sku') {
+      const imgs = readFolderImages(folderPath);
+      if (imgs.length === 1) {
+        logger.info(`  SKU preview auto-selected: ${folderName}/${path.basename(imgs[0])} ✓`);
+        return imgs[0];
+      }
+      if (imgs.length > 1) {
+        logger.warn(`  ${folderName}/ has ${imgs.length} images — please specify filename in sku sheet SKU预览图 column`);
+        return '';
+      }
+      continue;
     }
   }
 
   // 回退到根目录
   const rootFile = path.join(imageDir, basename);
-  if (fs.existsSync(rootFile)) {
+  if (basename && fs.existsSync(rootFile)) {
     logger.info(`  SKU preview: ${basename} ✓ (root)`);
     return rootFile;
   }
 
-  logger.warn(`  SKU preview not found: SKU图/${basename}, sku/${basename}, or ${basename}`);
+  if (!basename || basename === 'SKU图' || basename === 'sku') {
+    // 根目录下找单张图
+    const rootImgs = readFolderImages(imageDir);
+    if (rootImgs.length === 1) {
+      logger.info(`  SKU preview auto-selected from root: ${path.basename(rootImgs[0])} ✓`);
+      return rootImgs[0];
+    }
+  }
+
+  logger.warn(`  SKU preview not found for: ${basename || '(auto)'}`);
   return '';
 }
 
@@ -156,57 +205,73 @@ function resolveSkuPreviewPath(imageDir, previewFile) {
  */
 
 /**
- * 从 products 工作表提取规格维度（去重排序，按 sku 表出现顺序）
+ * 从 products 表字段动态提取规格维度
+ * 优先读取 sku_1_name/sku_1_values, sku_2_name/sku_2_values, sku_3_name/sku_3_values
+ * 如果没有则从 sku 工作表自动推断（向后兼容）
  */
-function extractDimensions(skuSheet, productId) {
-  const skuRows = skuSheet.filter(r =>
+function extractDimensions(productRow, skuSheet, productId) {
+  const dims = [];
+  const sources = [];
+
+  // 动态读取 products 表的 sku_N_name / sku_N_values
+  for (let n = 1; n <= 3; n++) {
+    const name = productRow[`sku_${n}_name`];
+    const valuesRaw = productRow[`sku_${n}_values`];
+    if (name && String(name).trim() !== '') {
+      const values = String(valuesRaw || '')
+        .split(/[;；]/).map(s => s.trim()).filter(Boolean);
+      if (values.length > 0) {
+        dims.push({ name: String(name).trim(), values });
+        sources.push('products_sheet');
+      }
+    }
+  }
+
+  // 如果 products 表有定义，直接返回
+  if (dims.length > 0) {
+    logger.info(`  SKU dims from products sheet: ${dims.map(d => d.name + '(' + d.values.length + ')').join(', ')}`);
+    return dims;
+  }
+
+  // 向后兼容：从 sku 工作表自动推断
+  const skuRows = (skuSheet || []).filter(r =>
     String(r.product_id || '').trim() === productId
   );
   if (skuRows.length === 0) return [];
 
-  const dims = [];
   const sampleRow = skuRows[0];
-  const keys = Object.keys(sampleRow);
-
-  // 识别规格列（非 product_id / 库存 / 价格 / 编码 / 预览图）
   const skipKeys = new Set([
     'product_id', '库存', '拼单价', '单买价', '规格编码', 'sku预览图',
     'stock', 'group_price', 'single_price', 'spec_code', 'preview',
+    '重量', '条码', '备注', 'weight', 'barcode', 'remark',
   ]);
 
-  for (const key of keys) {
+  for (const key of Object.keys(sampleRow)) {
     const lower = key.toLowerCase().trim();
     if (skipKeys.has(key) || skipKeys.has(lower)) continue;
-
     const values = [];
     const seen = new Set();
     for (const row of skuRows) {
       const v = String(row[key] || '').trim();
-      if (v && !seen.has(v)) {
-        seen.add(v);
-        values.push(v);
-      }
+      if (v && !seen.has(v)) { seen.add(v); values.push(v); }
     }
-
-    if (values.length > 0) {
-      dims.push({ name: key, values });
-    }
+    if (values.length > 0) dims.push({ name: key, values });
   }
 
+  logger.info(`  SKU dims from sku sheet: ${dims.map(d => d.name + '(' + d.values.length + ')').join(', ')}`);
   return dims;
 }
 
 /**
  * 从 sku 工作表提取 SKU 行数据
+ * @param {string[]} dimNames - 规格列名列表
  */
-function extractSkuRows(skuSheet, productId, imageDir) {
-  const rows = skuSheet.filter(r =>
+function extractSkuRows(skuSheet, productId, imageDir, dimNames) {
+  const rows = (skuSheet || []).filter(r =>
     String(r.product_id || '').trim() === productId
   );
   if (rows.length === 0) return [];
-
-  const dims = extractDimensions(skuSheet, productId);
-  const dimNames = dims.map(d => d.name);
+  if (!dimNames || dimNames.length === 0) return [];
 
   return rows.map(row => {
     const specs = dimNames.map(n => String(row[n] || '').trim());
@@ -215,7 +280,6 @@ function extractSkuRows(skuSheet, productId, imageDir) {
     const singlePrice = String(row['单买价'] || row['single_price'] || '10.9');
     const specCode = String(row['规格编码'] || row['spec_code'] || '');
     const previewFile = String(row['SKU预览图'] || row['preview'] || '');
-
     const previewPath = resolveSkuPreviewPath(imageDir, previewFile);
 
     return { specs, stock, groupPrice, singlePrice, specCode, previewImage: previewPath };
@@ -230,7 +294,10 @@ function extractSkuRows(skuSheet, productId, imageDir) {
  */
 function mapProduct(productRow, attrSheet, skuSheet) {
   const productId = String(productRow.product_id || '').trim();
-  const imageDir = findImageDir(productId);
+  const assetDirOverride = String(productRow.asset_dir || '').trim();
+  const imgDirResult = findImageDir(productId, assetDirOverride);
+  const imageDir = imgDirResult?.imageDir || null;
+  const resolvedAssetName = imgDirResult?.displayName || productId;
 
   // 图片
   const mainImages = productRow.main_images
@@ -249,11 +316,12 @@ function mapProduct(productRow, attrSheet, skuSheet) {
     }))
     .filter(a => a.name && a.value);
 
-  // SKU 规格维度
-  const skuDimensions = extractDimensions(skuSheet || [], productId);
+  // SKU 规格维度（优先从 products 表字段，其次从 sku 表推断）
+  const skuDimensions = extractDimensions(productRow, skuSheet || [], productId);
 
   // SKU 行
-  const skuRows = extractSkuRows(skuSheet || [], productId, imageDir);
+  const skuRows = extractSkuRows(skuSheet || [], productId, imageDir,
+    skuDimensions.map(d => d.name));
 
   const product = {
     productId,
@@ -265,10 +333,12 @@ function mapProduct(productRow, attrSheet, skuSheet) {
     skuRows,
     categoryPath: productRow.category_path || '',
     freightTemplate: productRow.freight_template || '默认模板',
+    assetDir: assetDirOverride,
+    resolvedAssetName,
     _source: { productRow, attrSheet, skuSheet },
   };
 
-  logger.info(`Mapped: ${productId} | ${mainImages.length} imgs | ${attributes.length} attrs | ${skuRows.length} SKUs`);
+  logger.info(`Mapped: ${productId} | asset=${resolvedAssetName} | ${mainImages.length} imgs | ${attributes.length} attrs | ${skuRows.length} SKUs`);
   return product;
 }
 

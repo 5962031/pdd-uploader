@@ -27,18 +27,35 @@ Excel 3工作表(products/attributes/sku)
 ## 运行命令
 
 ```powershell
-# 干跑校验（不开浏览器，只检查 Excel 数据完整性）
+# 干跑校验（不开浏览器）
 npm run dry-run
 
-# 正式运行 label_001（填完停住，不发布）
+# 单个商品
 npm run run:label
+node src/index.js --product=label_002
 
-# 批量模式（逐个商品，人工按 Enter 确认）
-npm run batch
+# 批量草稿（逐个商品，人工确认）
+npm run batch:draft
+node src/index.js --batch-draft
 
-# 快速调试（截图当前页面）
+# 批量筛选
+node src/index.js --batch-draft --only=label_002,车贴01
+node src/index.js --batch-draft --from=car_sticker_001
+
+# 干跑筛选
+node src/index.js --dry-run --only=label_002
+
+# 快速调试
 npm run inspect
 ```
+
+## V1.1 新增
+
+**批量草稿模式** (`--batch-draft`):
+- 逐个商品执行完整上架流程，失败不中断
+- 每个商品重新进入发布入口（不复用表单状态）
+- 生成 `logs/batch-report-*.json` 报告
+- 支持 `--only`（指定商品）和 `--from`（从某商品开始）
 
 ## 技术栈
 
@@ -134,6 +151,24 @@ assets/label_002/
     ├── red.png
     └── blue.png
 ```
+
+### 2026-06-06: 多类目兼容 (#17)
+
+**属性**: 页面不存在的属性不再 WARN（改 INFO），不中断流程。日志改为 `x filled, x skipped/not-on-page`。
+
+**规格**: `fill-sku-specs.js` 重写为多路径兼容：
+- 路径1: `自定义{specName}` role textbox
+- 路径2: placeholder 模糊匹配
+- 路径3: 打印所有可见 input 辅助调试
+- 路径4: 最后可见 textbox fallback
+
+### 2026-06-06: 动态 SKU 规格维度 (#16)
+
+**改动**: `extractDimensions()` 现在优先从 products 表的 `sku_1_name/sku_1_values`, `sku_2_name/sku_2_values`, `sku_3_name/sku_3_values` 动态构建维度。没有则回退到从 sku 工作表自动推断。
+
+**支持的维度数**: 1个/2个/3个规格（任意名称）
+
+**向后兼容**: 旧 Excel 无 sku_x_name 字段时自动从 sku 表推断
 
 ### 2026-06-05: 多品类模板系统 V1.2 (#15)
 
