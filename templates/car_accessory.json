@@ -1,0 +1,18 @@
+{
+  "template_id": "car_accessory",
+  "template_name": "汽车外饰用品",
+  "category_path": "汽车/用品/配件/改装 > 汽车外饰品/加装装潢/防护 > 汽车外饰品 > 汽车车标",
+  "required_attributes": [
+    {
+      "name": "品牌",
+      "default": "无品牌/无法注册商标"
+    },
+    {
+      "name": "产品类型",
+      "default": "个性车标"
+    }
+  ],
+  "optional_attributes": [],
+  "sku_dimensions": [],
+  "media_types": ["main", "detail", "sku"]
+}

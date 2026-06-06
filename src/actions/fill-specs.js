@@ -69,48 +69,68 @@ async function fillSpecValues(page, specName, values) {
   if (await customInputs.count() > 0) {
     for (let i = 0; i < values.length; i++) {
       const inputs = page.getByRole('textbox', { name: `自定义${specName}` });
-      const cc = await inputs.count();
-      await inputs.nth(cc - 1).fill(values[i]);
+      await inputs.nth((await inputs.count()) - 1).fill(values[i]);
       await page.waitForTimeout(config.timeouts.reactRerender);
     }
-    logger.info(`  ✓ ${values.length} values filled via "自定义${specName}"`);
+    logger.info(`    ✓ ${values.length} values via "自定义${specName}"`);
     return;
   }
 
-  // 路径2: 用 placeholder 模糊匹配
-  const fuzzyInputs = page.locator(`input[placeholder*="${specName}"], textbox[placeholder*="${specName}"]`);
-  if (await fuzzyInputs.count() > 0) {
-    for (let i = 0; i < values.length; i++) {
-      const inputs = page.locator(`input[placeholder*="${specName}"]`);
-      const cc = await inputs.count();
-      await inputs.nth(cc - 1).fill(values[i]);
-      await page.waitForTimeout(config.timeouts.reactRerender);
+  // 路径2: 在规格区域找到包含 specName 文本的块，在其中找 textbox
+  const pageText = await page.evaluate(() => document.body.innerText);
+  if (pageText.includes(specName)) {
+    // 尝试找到所有可见 textbox 并按位置填入
+    const allTb = page.getByRole('textbox');
+    const tc = await allTb.count();
+    // 收集可用的空 textbox
+    const emptyTb = [];
+    for (let i = 0; i < tc; i++) {
+      const v = await allTb.nth(i).inputValue().catch(() => '');
+      const ph = await allTb.nth(i).getAttribute('placeholder').catch(() => '');
+      // 排除规格类型选择框和已填值的
+      if (!ph.includes('规格类型') && (v === '' || v === '请输入')) {
+        emptyTb.push(i);
+      }
     }
-    logger.info(`  ✓ ${values.length} values filled via placeholder "${specName}"`);
-    return;
+    if (emptyTb.length > 0) {
+      for (let i = 0; i < values.length; i++) {
+        if (i < emptyTb.length) {
+          await allTb.nth(emptyTb[i]).fill(values[i]);
+          await page.waitForTimeout(config.timeouts.reactRerender);
+        }
+      }
+      logger.info(`    ✓ ${Math.min(values.length, emptyTb.length)} values via empty textboxes`);
+      return;
+    }
   }
 
-  // 路径3: 页面已存在固定值（不是可编辑文本框），扫描并打印
+  // 路径3: 打印调试信息
+  await debugSpecArea(page);
   const allInputs = await page.evaluate(() => {
     return [...document.querySelectorAll('input[type="text"], input:not([type]), textbox')]
       .filter(e => e.offsetHeight > 0)
-      .map(e => ({ placeholder: e.placeholder || '', value: e.value || '', tag: e.tagName }));
+      .map(e => ({ ph: e.placeholder || '', val: (e.value || '').substring(0, 20), tag: e.tagName }));
   });
-  logger.warn(`  ⚠ Cannot find inputs for "${specName}". Visible inputs: ${JSON.stringify(allInputs.slice(0, 10))}`);
+  logger.warn(`  ⚠ Cannot fill "${specName}". Inputs: ${JSON.stringify(allInputs.slice(0, 15))}`);
 
-  // 路径4: 最后尝试用可见的最后一个空 textbox
+  // 路径4: brute force — 找到所有可见 textbox，跳过规格类型选择框，逐个填
   try {
-    const allTb = page.getByRole('textbox');
-    const tc = await allTb.count();
-    for (let i = 0; i < values.length; i++) {
-      const last = allTb.nth(tc - 1);
-      await last.fill(values[i]);
+    const allRoleTb = page.getByRole('textbox');
+    const cnt = await allRoleTb.count();
+    let filled = 0;
+    for (let i = 0; i < cnt && filled < values.length; i++) {
+      const ph = await allRoleTb.nth(i).getAttribute('placeholder').catch(() => '');
+      const v = await allRoleTb.nth(i).inputValue().catch(() => '');
+      if (ph.includes('规格类型') || ph.includes('搜索')) continue;
+      if (v !== '' && v !== '请输入') continue;
+      await allRoleTb.nth(i).fill(values[filled]);
       await page.waitForTimeout(config.timeouts.reactRerender);
+      filled++;
     }
-    logger.info(`  ✓ ${values.length} values filled via last-visible textbox fallback`);
-    return;
+    if (filled > 0) logger.info(`    ✓ ${filled} values via brute-force textboxes`);
+    else logger.warn(`    ✗ All fill methods failed for "${specName}"`);
   } catch (err) {
-    logger.warn(`  ✗ All fill methods failed for "${specName}": ${err.message}`);
+    logger.warn(`    ✗ "${specName}" error: ${err.message}`);
   }
 }
 

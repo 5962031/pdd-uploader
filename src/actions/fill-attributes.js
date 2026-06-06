@@ -71,10 +71,41 @@ async function scanAllControls(page) {
 
 async function findLabelBox(page, attrName) {
   try {
-    const el = page.locator(`text="${attrName}"`).first();
-    if (await el.count() === 0) return null;
-    const box = await el.boundingBox();
-    return box ? { label: attrName, x: box.x, y: box.y, w: box.width, h: box.height, cy: box.y + box.height / 2 } : null;
+    // 策略1: 精确匹配
+    const exact = page.locator(`text="${attrName}"`).first();
+    if (await exact.count() > 0) {
+      const box = await exact.boundingBox();
+      if (box) return { label: attrName, x: box.x, y: box.y, w: box.width, h: box.height, cy: box.y + box.height / 2 };
+    }
+
+    // 策略2: 滚动到属性区后在所有可见文本中查找包含匹配
+    const result = await page.evaluate((name) => {
+      // 扫描所有可见的短文本节点（最可能是属性标签的）
+      const all = document.querySelectorAll('div, span, label, p, td, th');
+      const clean = (t) => t.replace(/[\*重要：:\s]/g, '').trim();
+
+      for (const el of all) {
+        const rect = el.getBoundingClientRect();
+        if (rect.width < 10 || rect.height < 8) continue;
+        const text = (el.innerText || el.textContent || '').trim();
+        if (text.length < 2 || text.length > 30) continue;
+
+        // 多种匹配
+        if (text === name) return { x: rect.x, y: rect.y, w: rect.width, h: rect.height };
+        if (text.includes(name)) return { x: rect.x, y: rect.y, w: rect.width, h: rect.height };
+        if (clean(text) === name) return { x: rect.x, y: rect.y, w: rect.width, h: rect.height };
+        if (clean(text).includes(name)) return { x: rect.x, y: rect.y, w: rect.width, h: rect.height };
+
+        // 例："重要 产品类型" 包含 "产品类型"
+        const spaced = text.replace(/\s+/g, '');
+        if (spaced.includes(name.replace(/\s+/g, ''))) return { x: rect.x, y: rect.y, w: rect.width, h: rect.height };
+      }
+      return null;
+    }, attrName);
+
+    if (result) return { label: attrName, x: result.x, y: result.y, w: result.w, h: result.h, cy: result.y + result.h / 2 };
+
+    return null;
   } catch { return null; }
 }
 
