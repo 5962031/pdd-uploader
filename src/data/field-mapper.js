@@ -103,8 +103,9 @@ const SKU_FIELD_MAP = {
 
   '库存': '库存', '拼单价': '拼单价', '单买价': '单买价',
   '规格编码': '规格编码',
-  'sku预览图': 'SKU预览图', 'sku图片': 'SKU预览图', '预览图': 'SKU预览图',
-  'SKU预览图': 'SKU预览图',
+  'sku预览图': 'SKU预览图', 'sku图片': 'SKU预览图', 'sku图': 'SKU预览图',
+  'sku预览图片': 'SKU预览图', '预览图': 'SKU预览图', '规格图': 'SKU预览图', '规格图片': 'SKU预览图',
+  'SKU预览图': 'SKU预览图', 'SKU图片': 'SKU预览图', 'SKU图': 'SKU预览图',
   '重量': '重量', '条码': '条码', '备注': '备注',
 
   'stock': '库存', 'group_price': '拼单价', 'single_price': '单买价',
@@ -131,6 +132,9 @@ const TEMPLATE_VALUE_MAP = {
   '通用': 'generic',
   'generic': 'generic',
 
+  '车贴': 'car_accessory',
+  '车标': 'car_accessory',
+  '汽车车贴': 'car_accessory',
   '汽车用品': 'car_accessory',
   '汽车外饰': 'car_accessory',
   'car_accessory': 'car_accessory',

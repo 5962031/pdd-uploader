@@ -1,18 +1,28 @@
 {
   "template_id": "car_accessory",
-  "template_name": "汽车外饰用品",
-  "category_path": "汽车/用品/配件/改装 > 汽车外饰品/加装装潢/防护 > 汽车外饰品 > 汽车车标",
+  "template_name": "汽车用品",
+  "description": "汽车外饰/车贴/车标等",
+  "version": "1.0",
+  "category_path": "汽车/用品/配件/改装>汽车外饰品/加装装潢/防护>汽车外饰品>车身贴/车身拉花",
+  "image_folders": { "main": "主图", "detail": "详情图", "sku": "SKU图" },
   "required_attributes": [
-    {
-      "name": "品牌",
-      "default": "无品牌/无法注册商标"
-    },
-    {
-      "name": "产品类型",
-      "default": "个性车标"
-    }
+    { "name": "品牌", "default": "无品牌" },
+    { "name": "产品类型", "default": "个性车标" }
   ],
   "optional_attributes": [],
   "sku_dimensions": [],
-  "media_types": ["main", "detail", "sku"]
+  "media_types": {
+    "main_image_format": ["png", "jpg", "jpeg", "webp"],
+    "max_main_images": 10,
+    "max_detail_images": 50,
+    "sku_preview_required": false
+  },
+  "risk_checks": {
+    "require_trademark": false,
+    "require_license": false,
+    "restricted_keywords": [],
+    "price_min": 1,
+    "price_max": 200,
+    "stock_min": 1
+  }
 }

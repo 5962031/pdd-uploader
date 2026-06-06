@@ -139,13 +139,17 @@ function matchImages(imageDir, pattern) {
  *   2. 再查 {imageDir}/{filename}（向后兼容根目录）
  */
 function resolveSkuPreviewPath(imageDir, previewFile) {
-  if (!previewFile || !imageDir) return '';
+  if (!imageDir) return '';
+  // previewFile 可以为空字符串（触发自动选择），但 null/undefined 直接返回
+  if (previewFile === null || previewFile === undefined) return '';
 
-  const basename = path.basename(String(previewFile));
-  if (!basename) return '';
+  const basename = path.basename(String(previewFile || ''));
 
   // 按优先级查找: SKU图/ → sku/ → 根目录
-  for (const folderName of ['SKU图', 'sku']) {
+  const foldersToCheck = ['SKU图', 'sku'];
+  logger.debug(`  resolveSkuPreview: imageDir="${imageDir}" basename="${basename}"`);
+
+  for (const folderName of foldersToCheck) {
     const folderPath = path.join(imageDir, folderName);
     const subFile = path.join(folderPath, basename);
 
@@ -154,19 +158,21 @@ function resolveSkuPreviewPath(imageDir, previewFile) {
       logger.info(`  SKU preview: ${folderName}/${basename} ✓`);
       return subFile;
     }
+  }
 
-    // 特殊：previewFile 是文件夹名（如 "SKU图"）或为空 → 取文件夹第一张图
-    if (!basename || basename === 'SKU图' || basename === 'sku') {
+  // 自动选择：basename为空时
+  if (!basename || basename === 'SKU图' || basename === 'sku') {
+    for (const folderName of foldersToCheck) {
+      const folderPath = path.join(imageDir, folderName);
+      if (!fs.existsSync(folderPath)) continue;
       const imgs = readFolderImages(folderPath);
       if (imgs.length === 1) {
         logger.info(`  SKU preview auto-selected: ${folderName}/${path.basename(imgs[0])} ✓`);
         return imgs[0];
       }
       if (imgs.length > 1) {
-        logger.warn(`  ${folderName}/ has ${imgs.length} images — please specify filename in sku sheet SKU预览图 column`);
-        return '';
+        logger.warn(`  ${folderName}/ has ${imgs.length} images — specify filename in sku sheet SKU预览图 column`);
       }
-      continue;
     }
   }
 
@@ -290,7 +296,8 @@ function extractSkuRows(skuSheet, productId, imageDir, dimNames) {
     const groupPrice = String(row['拼单价'] || row['group_price'] || '9.9');
     const singlePrice = String(row['单买价'] || row['single_price'] || '10.9');
     const specCode = String(row['规格编码'] || row['spec_code'] || '');
-    const previewFile = String(row['SKU预览图'] || row['preview'] || '');
+    const previewFile = String(row['SKU预览图'] || row['preview'] || row['SKU图'] || row['SKU图片'] || row['预览图'] || '');
+    logger.debug(`  SKU raw preview fields: SKU预览图="${row['SKU预览图']}", preview="${row['preview']}", resolved="${previewFile}"`);
     const previewPath = resolveSkuPreviewPath(imageDir, previewFile);
 
     return { specs, stock, groupPrice, singlePrice, specCode, previewImage: previewPath };
