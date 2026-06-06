@@ -16,22 +16,36 @@ async function scanAllLabels(page, attrNames) {
   const results = [];
   for (const name of attrNames) {
     try {
-      const box = await page.evaluate((n) => {
+      // 用evaluate扫描所有小文本节点，严格过滤
+      const boxes = await page.evaluate((n) => {
         const clean = (t) => t.replace(/[\*重要：:\s]/g, '').trim();
+        const hits = [];
         const all = document.querySelectorAll('div, span, label, p, td, th');
         for (const el of all) {
           const r = el.getBoundingClientRect();
-          if (r.width < 8 || r.height < 6) continue;
+          // 严格尺寸限制：小文本节点
+          if (r.width < 6 || r.height < 5) continue;
+          if (r.width > 400 || r.height > 80) continue; // 排除大容器
+          if (r.y < 100) continue; // 排除顶部导航
           const t = (el.innerText || el.textContent || '').trim();
-          if (t.length < 2 || t.length > 30) continue;
-          if (t === n || t.includes(n) || clean(t) === n || clean(t).includes(n) || t.replace(/\s+/g, '').includes(n.replace(/\s+/g, '')))
-            return { x: r.x, y: r.y, w: r.width, h: r.height };
+          if (t.length < 2 || t.length > 25) continue;
+          // 精确匹配：文本等于属性名，或去掉修饰词后等于
+          if (t === n || clean(t) === n || clean(t).includes(n) && t.length <= n.length + 6) {
+            hits.push({ x: r.x, y: r.y, w: r.width, h: r.height });
+          }
         }
-        return null;
+        // 去重：相同坐标只保留第一个
+        const deduped = [];
+        for (const h of hits) {
+          if (!deduped.find(d => Math.abs(d.x - h.x) < 5 && Math.abs(d.y - h.y) < 5)) deduped.push(h);
+        }
+        // 返回最像label的那个（宽度最小、文本最短的）
+        deduped.sort((a, b) => a.w - b.w);
+        return deduped[0] || null;
       }, name);
-      if (box) {
-        results.push({ name, x: box.x, y: box.y, w: box.w, h: box.h, cy: box.y + box.h / 2 });
-        logger.debug(`  label "${name}" @(${box.x.toFixed(0)},${box.y.toFixed(0)})`);
+      if (boxes) {
+        results.push({ name, x: boxes.x, y: boxes.y, w: boxes.w, h: boxes.h, cy: boxes.y + boxes.h / 2 });
+        logger.debug(`  label "${name}" @(${boxes.x.toFixed(0)},${boxes.y.toFixed(0)}) ${boxes.w.toFixed(0)}x${boxes.h.toFixed(0)}`);
       } else {
         logger.info(`  label "${name}" NOT FOUND on page`);
       }
@@ -43,34 +57,33 @@ async function scanAllLabels(page, attrNames) {
 async function scanAllControls(page) {
   return page.evaluate(() => {
     const results = [];
-    // 扫一切可能是下拉框/选择器的东西
     const candidates = document.querySelectorAll(
-      'input, div, span, button, [role="combobox"], [role="listbox"], [class*="select"], [class*="Select"], [class*="input"], [class*="Input"], [class*="ST_"], [class*="IPT_"], [class*="beast"], [class*="picker"], [class*="Picker"]'
+      'input, div, span, [role="combobox"], [class*="select"], [class*="Select"], [class*="ST_"], [class*="IPT_"], [class*="beast"]'
     );
     candidates.forEach((el, i) => {
       const r = el.getBoundingClientRect();
+      // 严格过滤：控件必须在合理区域内（排除顶部/底部/右边缘/隐藏元素）
       if (r.width < 20 || r.height < 8) return;
+      if (r.y < 150 || r.y > 2000) return;  // 排除顶部导航和底部
+      if (r.x < 50 || r.x > 1500) return;   // 排除左/右边缘
       const text = (el.innerText || el.textContent || el.value || el.placeholder || '').trim().replace(/\n/g, ' ');
       const cls = (el.className?.toString() || '').substring(0, 40);
-      // 关键词：请选择、select相关class、可点击的下拉区域
       const isSelectLike = text === '请选择' ||
-        /select|Select|picker|Picker/i.test(cls) ||
-        (el.tagName === 'INPUT' && (el.type === 'text' || !el.type));
-      if (isSelectLike || text === '请选择' || r.width > 80) {
+        /select|Select|ST_|IPT_|beast/i.test(cls) ||
+        (el.tagName === 'INPUT' && (el.type === 'text' || !el.type) && (el.placeholder || '').includes('请'));
+      if (isSelectLike) {
         results.push({
           idx: i, tag: el.tagName, cls,
           text: text.substring(0, 30),
-          placeholder: (el.placeholder || '').substring(0, 30),
           x: r.x, y: r.y, w: r.width, h: r.height,
           cx: r.x + r.width / 2, cy: r.y + r.height / 2,
         });
       }
     });
-    // 去重（相近坐标只保留一个）
+    // 去重
     const deduped = [];
     for (const c of results) {
-      const dup = deduped.find(d => Math.abs(d.x - c.x) < 10 && Math.abs(d.y - c.y) < 10);
-      if (!dup) deduped.push(c);
+      if (!deduped.find(d => Math.abs(d.x - c.x) < 10 && Math.abs(d.y - c.y) < 10)) deduped.push(c);
     }
     return deduped;
   });
@@ -291,7 +304,11 @@ async function fillAttributes(page, product) {
   }
 
   await takeScreenshot(page, '07_attrs_done');
-  logger.info(`Attributes: ${filled} filled, ${already} already-OK, ${skipped} skipped`);
+  const total = filled + already;
+  if (total === 0 && attrs.length > 0) {
+    logger.warn(`⚠ Attributes ALL FAILED: 0/${attrs.length} filled. Page may require manual check.`);
+  }
+  logger.info(`Attributes: ${filled} filled, ${already} already-OK, ${skipped} skipped (of ${attrs.length} total)`);
 }
 
 module.exports = { fillAttributes };

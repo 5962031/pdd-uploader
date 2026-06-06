@@ -59,24 +59,27 @@ function mergeAttributes(template, excelAttributes) {
 
   if (templateAttrs.length === 0) return excelAttributes || [];
 
-  // 以 Excel 为准建立索引
+  // 以 Excel 为准建立索引（兼容 属性名/属性值 和 name/value 两种格式）
   const excelMap = {};
   for (const a of (excelAttributes || [])) {
-    excelMap[a.name] = a.value;
+    const key = a['属性名'] || a.name || '';
+    const val = a['属性值'] || a.value || '';
+    if (key) excelMap[key] = val;
   }
 
   // 合并：Excel 有值用 Excel，否则用模板默认值
-  const merged = templateAttrs.map(ta => ({
-    name: ta.name,
-    value: excelMap[ta.name] !== undefined && excelMap[ta.name] !== ''
-      ? excelMap[ta.name]
-      : (ta.default || ''),
-  }));
+  const merged = templateAttrs.map(ta => {
+    const excelVal = excelMap[ta.name];
+    const useExcel = excelVal !== undefined && excelVal !== null && String(excelVal).trim() !== '';
+    const finalVal = useExcel ? String(excelVal) : (ta.default || '');
+    return { name: ta.name, value: finalVal };
+  });
 
   // 加上 Excel 中独有的属性（不在模板里的）
   for (const a of (excelAttributes || [])) {
-    if (!templateAttrs.find(ta => ta.name === a.name)) {
-      merged.push(a);
+    const aName = a['属性名'] || a.name || '';
+    if (aName && !templateAttrs.find(ta => ta.name === aName)) {
+      merged.push({ name: aName, value: a['属性值'] || a.value || '' });
     }
   }
 

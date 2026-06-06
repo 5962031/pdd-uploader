@@ -229,7 +229,7 @@ async function fillSkuTable(page, product) {
     else if (fn.includes('blue')) blueRows.push(j + 1);
   }
 
-  logger.info(`SKU: ${fully}/${fi.length} price-filled | previews: ${previewsOk}/9`);
+  logger.info(`SKU: ${fully}/${fi.length} price-filled | previews: ${previewsOk}/${skuRows.length}`);
   logger.info(`  mix.png rows: ${mixRows.join(',')}`);
   logger.info(`  red.png rows: ${redRows.join(',')}`);
   logger.info(`  blue.png rows: ${blueRows.join(',')}`);
