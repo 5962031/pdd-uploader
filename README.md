@@ -41,13 +41,50 @@ npm run run:label
 
 ## Excel 工作表
 
-`D:\pddtest\资料表\products.xlsx`（3个工作表）：
+推荐使用中文模板：`docs/products_中文模板.xlsx`
 
-| 工作表 | 用途 |
-|--------|------|
-| `products` | 商品基础信息（product_id, title, category_path, asset_dir, main_images, detail_image, sku_1_name/values...） |
-| `attributes` | 商品属性（product_id, 属性名, 属性值） |
-| `sku` | SKU 明细（product_id, 规格列..., 库存, 拼单价, 单买价, 规格编码, SKU预览图） |
+`D:\pddtest\资料表\products.xlsx`（3个核心工作表）：
+
+| 工作表 | 别名 | 用途 |
+|--------|------|------|
+| 商品表 | products | 商品基础信息 |
+| 属性表 | attributes | 商品属性 |
+| SKU表 | sku | SKU 明细 |
+
+### 商品表字段（支持中/英文双表头）
+
+| 中文表头 | 英文表头 | 说明 |
+|---------|---------|------|
+| 商品ID | product_id | 三表关联唯一键 |
+| 商品模板 | template_id | 不干胶标签/食品快消/日用品/通用模板/汽车用品 |
+| 商品标题 | title | 最长30汉字 |
+| 类目路径 | category_path | 如: 数码电器>...>不干胶标签 |
+| 图片文件夹 | asset_dir | 对应 assets\ 下的文件夹名，留空=商品ID |
+| 主图 | main_images | "主图"=读主图\目录, 或文件名列表 |
+| 详情图 | detail_image | "详情图"=读详情图\目录 |
+| 规格1名称/选项 | sku_1_name/values | 如: 款式=红色;蓝色 |
+| 规格2名称/选项 | sku_2_name/values | 如: 容量=50张;100张 |
+| 运费模板 | freight_template | 默认模板 |
+| 发布模式 | publish_mode | 草稿(默认)/提交上架 |
+
+### 属性表字段
+
+| 中文表头 | 说明 |
+|---------|------|
+| 商品ID | 关联商品表 |
+| 属性名 | 页面属性名 |
+| 属性值 | 要填的值 |
+
+### SKU表字段
+
+| 中文表头 | 说明 |
+|---------|------|
+| 商品ID | 关联商品表 |
+| (动态规格列) | 由商品表的规格名称决定 |
+| 库存 | 库存数 |
+| 拼单价 | 拼单价格 |
+| 单买价 | 单独购买价 |
+| SKU预览图 | 文件名, 如 red.png |
 
 ## 图片目录规则
 
