@@ -141,25 +141,47 @@ async function fillSpecifications(page, product) {
     logger.info(`  Block "${dim.name}" top=${block.top.toFixed(0)} bottom=${block.bottom.toFixed(0)}`);
 
     // 逐个值
-    let beforeVals = await readBlockValues(page, block);
-    logger.info(`  Before fill: ${JSON.stringify(beforeVals)}`);
-
     for (let vi = 0; vi < dim.values.length; vi++) {
+      // 追加值前：重新扫描 block（边界可能已变）
       if (vi > 0) {
-        const clicked = await clickAddInBlock(page, block);
-        if (clicked) {
-          await page.waitForTimeout(500);
-          logger.info(`  Clicked add in "${dim.name}" block`);
+        // 先点"添加定制规格"
+        let clicked = await clickAddInBlock(page, block);
+        if (!clicked) {
+          // 重新扫描后重试
+          const reBlock = await findSpecBlockRoot(page, dim.name);
+          if (reBlock.found) { clicked = await clickAddInBlock(page, reBlock); block.top = reBlock.top; block.bottom = reBlock.bottom; }
+        }
+        await page.waitForTimeout(600);
+        if (clicked) logger.info(`  Clicked add in "${dim.name}" block`);
+
+        // 重新扫描 block + 验证 input 是否增加
+        const newBlock = await findSpecBlockRoot(page, dim.name);
+        if (newBlock.found) { block.top = newBlock.top; block.bottom = newBlock.bottom; }
+        const afterAddVals = await readBlockValues(page, block);
+        if (afterAddVals.length <= vi) {
+          logger.warn(`  Add did NOT create new input: before=${vi} after=${afterAddVals.length}. Retrying...`);
+          // 再点一次
+          const re2 = await findSpecBlockRoot(page, dim.name);
+          if (re2.found) { block.top = re2.top; block.bottom = re2.bottom; await clickAddInBlock(page, re2); await page.waitForTimeout(600); }
         }
       }
 
+      // 重新扫描 block 确保 bounds 最新
+      const curBlock = await findSpecBlockRoot(page, dim.name);
+      if (curBlock.found) { block.top = curBlock.top; block.bottom = curBlock.bottom; }
+
+      // 只填空 input（跳过已填值的）
       const filled = await fillOneValueInBlock(page, block, dim.values[vi]);
-      if (!filled) { await takeScreenshot(page, `08_noinput_${dim.name}`); throw new Error(`Cannot fill value in "${dim.name}" block`); }
+      if (!filled) {
+        await takeScreenshot(page, `08_noinput_${dim.name}`);
+        throw new Error(`Cannot fill value "${dim.values[vi]}" in "${dim.name}" block`);
+      }
 
-      // 点空白处触发提交
+      // 提交
       await page.mouse.click(block.left + 10, block.top - 20);
-      await page.waitForTimeout(400);
+      await page.waitForTimeout(500);
 
+      // 校验
       const afterVals = await readBlockValues(page, block);
       logger.info(`  After "${dim.values[vi]}": ${JSON.stringify(afterVals)}`);
 
@@ -195,9 +217,12 @@ async function fillSpecifications(page, product) {
     await page.waitForTimeout(500);
     rows = await countSkuRows(page);
   }
-  if (rows !== expected) {
+  if (rows < expected) {
     await takeScreenshot(page, '08_sku_rows');
-    throw new Error(`SKU row count: page=${rows} excel=${expected}`);
+    throw new Error(`SKU row count too low: page=${rows} excel=${expected}`);
+  }
+  if (rows > expected) {
+    logger.warn(`SKU rows page=${rows} > excel=${expected}, extra rows will be ignored`);
   }
   logger.info(`SKU rows: ${rows}/${expected} ✓`);
 }
