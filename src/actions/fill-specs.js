@@ -52,21 +52,19 @@ async function findSpecBlockRoot(page, labelText) {
  * 在当前规格块内找空 textbox（通过 evaluate 在块内查询，不扫全局）
  */
 async function findAndFillInBlock(page, block, value) {
-  const result = await page.evaluate((b, v) => {
+  const result = await page.evaluate((args) => {
+    const b = args.block;
+    const v = args.value;
     // 只找 block 区域内的 textbox
     const inputs = document.querySelectorAll('[data-testid="beast-core-input-htmlInput"], input[type="text"], input:not([type])');
     for (const inp of inputs) {
       const r = inp.getBoundingClientRect();
       if (r.width < 30 || r.height < 10) continue;
-      if (r.y < b.top || r.y > b.bottom) continue;  // 必须在 block 区域内
-      if (Math.abs(r.x - b.left) > 350) continue;     // x 不能差太远
-
-      // 排除规格类型选择框
+      if (r.y < b.top || r.y > b.bottom) continue;
+      if (Math.abs(r.x - b.left) > 350) continue;
       if ((inp.placeholder || '').includes('规格类型')) continue;
-
       const val = inp.value || '';
       if (val === '' || val === '请输入规格名称' || val === '请输入') {
-        // 找到了！用原生 setter 设值
         const desc = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
         desc.set.call(inp, v);
         inp.dispatchEvent(new Event('input', { bubbles: true }));
@@ -75,7 +73,7 @@ async function findAndFillInBlock(page, block, value) {
       }
     }
     return { filled: false };
-  }, block, value);
+  }, { block, value });
 
   return result?.filled || false;
 }
