@@ -156,7 +156,21 @@ const PUBLISH_MODE_MAP = {
  * 解析工作表名
  */
 function resolveSheetName(name) {
-  return SHEET_ALIASES[name] || name;
+  // 精确匹配
+  if (SHEET_ALIASES[name]) return SHEET_ALIASES[name];
+  // 去空格后匹配
+  const trimmed = name.trim();
+  if (SHEET_ALIASES[trimmed]) return SHEET_ALIASES[trimmed];
+  // 中文关键词模糊匹配
+  const lower = trimmed.toLowerCase();
+  if (lower.includes('商品') && (lower.includes('表') || lower.includes('主'))) return 'products';
+  if (lower.includes('属性')) return 'attributes';
+  if (lower.includes('sku') || lower.includes('规格') || lower.includes('价格表')) return 'sku';
+  // 英文兼容
+  if (lower === 'products') return 'products';
+  if (lower === 'attributes') return 'attributes';
+  if (lower === 'sku') return 'sku';
+  return name;
 }
 
 /**
