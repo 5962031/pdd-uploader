@@ -35,39 +35,37 @@ async function launchBrowser() {
     logger.info(`CDP attach failed (${cdpErr.message}), trying channel mode...`);
   }
 
-  // ---- 策略 B: channel 模式启动系统 Chrome ----
-  logger.step('Launching system Chrome via channel mode');
+  // ---- 策略 B: 自动启动系统 Chrome（persistent context） ----
+  logger.step('Launching system Chrome with persistent context...');
+  const userDataDir = config.chrome.userDataDir;
+  const launchOpts = {
+    headless: false,
+    channel: 'chrome',
+    args: [
+      '--disable-blink-features=AutomationControlled',
+      '--start-maximized',
+    ],
+    viewport: null, // persistent context 用实际窗口大小
+  };
+
   try {
-    browser = await chromium.launch({
-      channel: 'chrome',               // 使用系统已安装的 Chrome
-      headless: false,                  // 必须可见，方便人工扫码登录
-      args: [
-        '--disable-blink-features=AutomationControlled',
-        `--user-data-dir=${config.chrome.userDataDir}`,
-        '--start-maximized',
-      ],
-    });
-  } catch (channelErr) {
-    // channel 模式失败，尝试 exePath
-    logger.warn(`Channel mode failed (${channelErr.message}), trying exePath...`);
-    browser = await chromium.launch({
-      executablePath: config.chrome.exePath,
-      headless: false,
-      args: [
-        '--disable-blink-features=AutomationControlled',
-        `--user-data-dir=${config.chrome.userDataDir}`,
-        '--start-maximized',
-      ],
-    });
+    context = await chromium.launchPersistentContext(userDataDir, launchOpts);
+  } catch (e1) {
+    logger.warn(`Channel mode failed (${e1.message}), trying exePath...`);
+    try {
+      const opts2 = { ...launchOpts, executablePath: config.chrome.exePath, channel: undefined };
+      context = await chromium.launchPersistentContext(userDataDir, opts2);
+    } catch (e2) {
+      logger.error(`exePath also failed (${e2.message})`);
+      throw e2;
+    }
   }
 
-  context = await browser.newContext({
-    viewport: { width: 1440, height: 900 },
-    locale: 'zh-CN',
-  });
-  page = await context.newPage();
+  browser = context.browser();
+  const pages = context.pages();
+  page = pages[0] || await context.newPage();
 
-  logger.info('Browser launched successfully');
+  logger.info('Browser launched successfully (persistent context)');
   return { browser, context, page, mode: 'channel' };
 }
 

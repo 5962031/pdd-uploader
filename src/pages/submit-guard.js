@@ -6,6 +6,30 @@ const logger = require('../helpers/logger');
 const { takeScreenshot } = require('../helpers/screenshot');
 const { jsClickByText } = require('../helpers/js-click');
 
+/** 关闭遮挡弹窗：图片预览 / 保存成功提示 */
+async function dismissOverlays(page) {
+  try {
+    // 先尝试点确定按钮
+    const confirmBtn = page.locator('button:has-text("确定"), button:has-text("知道了"), button:has-text("关闭")').first();
+    if (await confirmBtn.count() > 0) {
+      await confirmBtn.click().catch(() => {});
+      await page.waitForTimeout(300);
+    }
+  } catch {}
+  // Esc
+  await page.keyboard.press('Escape');
+  await page.waitForTimeout(200);
+  // 点击页面标题区（远离缩略图）
+  try {
+    const titleEl = page.locator('text=商品标题').first();
+    if (await titleEl.count() > 0) {
+      await titleEl.click().catch(() => {});
+      await page.waitForTimeout(200);
+    }
+  } catch {}
+  logger.debug('Overlays dismissed');
+}
+
 /**
  * 停止在发布前，可选保存草稿
  * @param {import('playwright').Page} page
@@ -36,6 +60,9 @@ async function stopBeforePublish(page, autoPublish = false) {
 
     throw new Error('Submit button not found, cannot publish');
   }
+
+  // ---- 关闭所有可能挡住的弹窗/浮层 ----
+  await dismissOverlays(page);
 
   // ---- 默认行为：停在这里，保存草稿 ----
   logger.info('');

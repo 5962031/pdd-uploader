@@ -1,5 +1,5 @@
 /**
- * 属性填写 — 品牌严格选择 + 全部读回校验 + 失败throw
+ * 属性填写 — 全量控件扫描 + 品牌严格 + 终检throw
  */
 const config = require('../config');
 const logger = require('../helpers/logger');
@@ -9,147 +9,208 @@ const NO_FUZZY = ['是否支持定制', '是否带音乐', '是否进口', '是�
 const isNoFuzzy = (name) => NO_FUZZY.some(f => name.includes(f) || f.includes(name));
 const BRAND_OK = ['无品牌', '无品牌/无法注册商标', '无品牌/无注册商标', '无品牌/无需注册商标'];
 
-async function findLabelBox(page, attrName) {
-  try {
-    const exact = page.locator(`text="${attrName}"`).first();
-    if (await exact.count() > 0) { const b = await exact.boundingBox(); if (b) return { ...b, label: attrName, cy: b.y + b.h / 2 }; }
-    return await page.evaluate((n) => {
-      const clean = (t) => t.replace(/[\*重要：:\s]/g, '').trim();
-      const all = document.querySelectorAll('div, span, label, p, td, th');
-      for (const el of all) { const r = el.getBoundingClientRect(); if (r.w < 6 || r.h < 5 || r.w > 400 || r.h > 80 || r.y < 100) continue; const t = (el.innerText || '').trim(); if (t.length < 2 || t.length > 25) continue; if (t === n || clean(t) === n || (clean(t).includes(n) && t.length <= n.length + 6)) return { x: r.x, y: r.y, w: r.w, h: r.h }; }
-      return null;
-    }, attrName).then(r => r ? { ...r, label: attrName, cy: r.y + r.h / 2 } : null);
-  } catch { return null; }
+// ═══════════════════════════════════════════════
+// Label 扫描
+// ═══════════════════════════════════════════════
+async function scanAllLabels(page, attrNames) {
+  const results = [];
+  for (const name of attrNames) {
+    try {
+      const box = await page.evaluate((n) => {
+        const clean = (t) => t.replace(/[\*重要：:\s]/g, '').trim();
+        const all = document.querySelectorAll('div, span, label, p, td, th');
+        for (const el of all) {
+          const r = el.getBoundingClientRect();
+          if (r.width < 6 || r.height < 5 || r.width > 400 || r.height > 80 || r.y < 100) continue;
+          const t = (el.innerText || el.textContent || '').trim();
+          if (t.length < 2 || t.length > 25) continue;
+          if (t === n || clean(t) === n || (clean(t).includes(n) && t.length <= n.length + 6))
+            return { x: r.x, y: r.y, w: r.width, h: r.height };
+        }
+        return null;
+      }, name);
+      if (box) results.push({ name, x: box.x, y: box.y, w: box.w, h: box.h, cy: box.y + box.h / 2 });
+      else logger.info(`  label "${name}" NOT FOUND`);
+    } catch {}
+  }
+  return results;
 }
 
-async function scanControlBoxes(page) {
+// ═══════════════════════════════════════════════
+// Control 全量扫描（恢复Grid_col/IPT/ST/select等div组件）
+// ═══════════════════════════════════════════════
+async function scanAllControls(page) {
   return page.evaluate(() => {
-    const r = [];
-    document.querySelectorAll('[data-testid="beast-core-select-htmlInput"]').forEach(el => { const b = el.getBoundingClientRect(); if (b.w > 15 && b.h > 5 && b.y > 150 && b.y < 2000 && b.x > 50 && b.x < 1500) r.push({ idx: r.length, tag: 'INPUT', x: b.x, y: b.y, w: b.w, h: b.h, cx: b.x + b.w / 2, cy: b.y + b.h / 2 }); });
-    return r;
+    const results = [];
+    const candidates = document.querySelectorAll(
+      'input, div, span, [role="combobox"], [role="listbox"], [class*="select"], [class*="Select"], [class*="input"], [class*="Input"], [class*="ST_"], [class*="IPT_"], [class*="Grid_col"], [class*="beast"], [class*="picker"], [class*="Picker"]'
+    );
+    candidates.forEach((el, i) => {
+      const r = el.getBoundingClientRect();
+      if (r.width < 20 || r.height < 8 || r.y < 150 || r.y > 2000 || r.x < 50 || r.x > 1500) return;
+      const text = (el.innerText || el.textContent || el.value || el.placeholder || '').trim().replace(/\n/g, ' ');
+      const cls = (el.className?.toString() || '').substring(0, 50);
+      const isSelectLike = text === '请选择'
+        || /select|Select|picker|Picker|beast|Grid_col|IPT_|ST_/i.test(cls)
+        || (el.tagName === 'INPUT' && (el.type === 'text' || !el.type) && (el.placeholder || '').includes('请'));
+      if (isSelectLike) {
+        results.push({
+          idx: i, tag: el.tagName, cls,
+          text: text.substring(0, 30),
+          x: r.x, y: r.y, w: r.width, h: r.height,
+          cx: r.x + r.width / 2, cy: r.y + r.height / 2,
+        });
+      }
+    });
+    // 去重
+    const dedup = [];
+    for (const c of results) {
+      if (!dedup.find(d => Math.abs(d.x - c.x) < 10 && Math.abs(d.y - c.y) < 10)) dedup.push(c);
+    }
+    return dedup;
   });
 }
 
+// ═══════════════════════════════════════════════
+// 坐标匹配
+// ═══════════════════════════════════════════════
 function matchControl(label, controls) {
   let best = null, bestS = Infinity;
-  for (const c of controls) { const dy = Math.abs(c.cy - label.cy); const dx = c.x - (label.x + label.w); if (dy < 80 && dx > -20) { const s = dy + Math.abs(dx) * 0.3; if (s < bestS) { bestS = s; best = c; } } }
+  for (const c of controls) {
+    const dy = Math.abs(c.cy - label.cy);
+    const dx = c.x - (label.x + label.w);
+    if (dy < 80 && dx > -20) { const s = dy + Math.abs(dx) * 0.3; if (s < bestS) { bestS = s; best = c; } }
+  }
   if (!best) for (const c of controls) { const dy = Math.abs(c.cy - label.cy); if (dy < bestS) { bestS = dy; best = c; } }
   return best;
 }
 
-/** 读回控件当前值 */
+// ═══════════════════════════════════════════════
+// 调试打印
+// ═══════════════════════════════════════════════
+function debugMatches(labels, controls) {
+  logger.debug(`Controls: ${controls.length} total`);
+  controls.forEach(c => logger.debug(`  ctrl#${c.idx} ${c.tag} "${c.text}" cls=${c.cls.substring(0,30)} @(${c.x.toFixed(0)},${c.y.toFixed(0)}) ${c.w.toFixed(0)}x${c.h.toFixed(0)}`));
+  for (const l of labels) {
+    const c = matchControl(l, controls);
+    logger.debug(`  "${l.name}" @y=${l.cy.toFixed(0)} → ctrl#${c?.idx ?? 'NONE'} @(${c?.x?.toFixed(0)??'?'},${c?.y?.toFixed(0)??'?'})`);
+  }
+}
+
+// ═══════════════════════════════════════════════
+// 值操作
+// ═══════════════════════════════════════════════
 async function readCurrentValue(page, ctrl) {
   try {
     return await page.evaluate((cx, cy) => {
-      for (const s of document.querySelectorAll('[data-testid="beast-core-select-htmlInput"]')) { const r = s.getBoundingClientRect(); if (Math.abs(r.y - cy) < 30 && Math.abs(r.x - cx) < 250) return (s.value || '').trim(); }
-      for (const d of document.querySelectorAll('div, span')) { const r = d.getBoundingClientRect(); if (Math.abs(r.y - cy) < 25 && r.x > cx - 40 && r.x < cx + 300) { const t = (d.innerText || '').trim(); if (t.length > 0 && t.length < 30 && t !== '请选择') return t; } }
+      for (const s of document.querySelectorAll('[data-testid="beast-core-select-htmlInput"]')) {
+        const r = s.getBoundingClientRect();
+        if (Math.abs(r.y - cy) < 30 && Math.abs(r.x - cx) < 250) return (s.value || '').trim();
+      }
+      for (const d of document.querySelectorAll('div, span')) {
+        const r = d.getBoundingClientRect();
+        if (Math.abs(r.y - cy) < 25 && r.x > cx - 40 && r.x < cx + 300) {
+          const t = (d.innerText || '').trim();
+          if (t.length > 0 && t.length < 30 && t !== '请选择') return t;
+        }
+      }
       return '';
     }, ctrl.cx, ctrl.cy);
   } catch { return ''; }
 }
 
-/** 品牌字段特殊处理 */
+/** 品牌严格选择 */
 async function fillBrand(page, target) {
-  const BRAND_INPUT = page.locator('input[placeholder*="品牌"]').first();
-  if (await BRAND_INPUT.count() === 0) return { ok: false, reason: 'no brand input', current: '' };
+  const inp = page.locator('input[placeholder*="品牌"]').first();
+  if (await inp.count() === 0) return { ok: false, reason: 'no brand input', current: '' };
 
-  const cur = await BRAND_INPUT.inputValue().catch(() => '');
-
-  // 当前值已经 OK？
+  const cur = await inp.inputValue().catch(() => '');
   if (BRAND_OK.some(b => cur.includes(b) || b.includes(cur))) return { ok: true, reason: 'already_' + cur, current: cur };
 
-  // 当前不是目标 → 清除
-  if (cur && !BRAND_OK.some(b => cur.includes(b))) {
-    await BRAND_INPUT.fill('');
-    await page.waitForTimeout(300);
-  }
-
-  // 搜索"无品牌"
-  await BRAND_INPUT.fill('无品牌');
+  // 清除
+  if (cur) { await inp.fill(''); await page.waitForTimeout(300); }
+  // 搜索
+  await inp.fill('无品牌');
   await page.waitForTimeout(800);
 
-  // 严格选择
+  let selected = null;
   for (const b of BRAND_OK) {
     const opt = page.getByRole('option', { name: b }).first();
-    if (await opt.count() > 0) { await opt.click(); await page.waitForTimeout(300); break; }
+    if (await opt.count() > 0) { await opt.click(); selected = b; await page.waitForTimeout(300); break; }
   }
-  // 也尝试包含匹配
-  const fuzzy = page.locator('[role="option"]:has-text("无品牌")').first();
-  if (await fuzzy.count() > 0) {
-    const ft = await fuzzy.innerText();
-    if (BRAND_OK.some(b => ft.includes(b))) { await fuzzy.click(); await page.waitForTimeout(300); }
+  if (!selected) {
+    const fz = page.locator('[role="option"]:has-text("无品牌")').first();
+    if (await fz.count() > 0) { const ft = await fz.innerText(); if (BRAND_OK.some(b => ft.includes(b))) { await fz.click(); await page.waitForTimeout(300); } }
   }
 
-  const actual = await BRAND_INPUT.inputValue().catch(() => '');
+  const actual = await inp.inputValue().catch(() => '');
   const ok = BRAND_OK.some(b => actual.includes(b) || b.includes(actual));
   return { ok, reason: ok ? 'brand_ok' : 'brand_wrong', current: actual };
 }
 
-/** 选择属性值 */
-async function selectExact(page, ctrl, value) {
-  // 多次尝试点击
+/** 选择属性值（多点击位置尝试） */
+async function selectExact(page, ctrl, value, attrName) {
+  const v = String(value).trim();
+  const forbidFuzzy = isNoFuzzy(attrName);
+
   for (let attempt = 0; attempt < 3; attempt++) {
-    if (attempt === 0) await page.mouse.click(ctrl.cx, ctrl.cy);
-    else if (attempt === 1) await page.mouse.click(ctrl.cx + ctrl.w / 2, ctrl.cy + ctrl.h / 2);
-    else await page.mouse.click(ctrl.cx + ctrl.w - 5, ctrl.cy);
+    let cx = ctrl.cx, cy = ctrl.cy;
+    if (attempt === 1) { cx = ctrl.x + ctrl.w / 2; cy = ctrl.y + ctrl.h / 2; }
+    else if (attempt === 2) { cx = ctrl.x + ctrl.w - 10; cy = ctrl.y + ctrl.h / 2; }
+
+    await page.mouse.click(cx, cy);
     await page.waitForTimeout(500);
 
-    const opts = await page.evaluate(() => [...document.querySelectorAll('[role="option"]')].map(o => o.innerText.trim()).filter(Boolean));
-    if (opts.length > 0) {
-      const v = String(value).trim();
-      const vNorm = v.replace(/\s/g, '');
+    const opts = await page.evaluate(() =>
+      [...document.querySelectorAll('[role="option"]')].map(o => o.innerText.trim()).filter(Boolean)
+    );
+    if (opts.length === 0) continue;
 
-      // 精确
-      const exact = page.getByRole('option', { name: v }).first();
-      if (await exact.count() > 0) { await exact.click(); return { ok: true, reason: 'exact' }; }
+    // 1. exact
+    const exact = page.getByRole('option', { name: v }).first();
+    if (await exact.count() > 0) { await exact.click(); return { ok: true, reason: 'exact' }; }
 
-      const exOpt = opts.find(o => o === v) || opts.find(o => o.replace(/\s/g, '') === vNorm);
-      if (exOpt) { const el = page.getByRole('option', { name: exOpt }).first(); if (await el.count() > 0) { await el.click(); return { ok: true, reason: 'opts-exact' }; } }
+    // 2. normalized
+    const vNorm = v.replace(/\s/g, '');
+    const exOpt = opts.find(o => o === v) || opts.find(o => o.replace(/\s/g, '') === vNorm);
+    if (exOpt) { const el = page.getByRole('option', { name: exOpt }).first(); if (await el.count() > 0) { await el.click(); return { ok: true, reason: 'opts-exact' }; } }
 
-      if (!isNoFuzzy('')) {
-        const fz = page.locator(`[role="option"]:has-text("${v}")`).first();
-        if (await fz.count() > 0) { await fz.click(); return { ok: true, reason: 'fuzzy' }; }
-      }
-
-      await page.keyboard.press('Escape');
-      return { ok: false, reason: `not found`, opts };
+    // 3. fuzzy (非是否类)
+    if (!forbidFuzzy) {
+      const fz = page.locator(`[role="option"]:has-text("${v}")`).first();
+      if (await fz.count() > 0) { const ft = await fz.innerText(); if (ft.length < v.length + 10) { await fz.click(); return { ok: true, reason: 'fuzzy' }; } }
     }
+
     await page.keyboard.press('Escape');
-    await page.waitForTimeout(200);
+    if (attempt === 2) return { ok: false, reason: `"${v}" not found`, opts };
   }
-  return { ok: false, reason: 'no dropdown after 3 attempts' };
+  return { ok: false, reason: 'no dropdown' };
 }
 
-/** 单属性填+校验 */
+/** 单个属性填+校验 */
 async function fillOneAttr(page, attr, ctrl) {
   const v = String(attr.value).trim();
   if (!v) return { ok: false, reason: 'empty' };
 
-  // 品牌特殊处理
   if (attr.name === '品牌') return fillBrand(page, v);
 
-  // 读当前值
   const cur = await readCurrentValue(page, ctrl);
-  if (cur && (cur === v || cur.replace(/\s/g, '') === v.replace(/\s/g, ''))) {
+  if (cur && (cur === v || cur.replace(/\s/g, '') === v.replace(/\s/g, '')))
     return { ok: true, reason: 'already', current: cur };
-  }
 
-  // 选择
-  let result = await selectExact(page, ctrl, v);
+  let result = await selectExact(page, ctrl, v, attr.name);
   await page.waitForTimeout(300);
 
-  // 读回
   const actual = await readCurrentValue(page, ctrl);
   if (result.ok && actual && actual !== v && actual.replace(/\s/g, '') !== v.replace(/\s/g, '')) {
-    // 选错了：重试
-    await page.mouse.click(ctrl.cx, ctrl.cy);
+    // 重试
+    await page.mouse.click(ctrl.cx + ctrl.w - 10, ctrl.cy + ctrl.h / 2);
     await page.waitForTimeout(400);
     const retry = page.getByRole('option', { name: v }).first();
     if (await retry.count() > 0) { await retry.click(); await page.waitForTimeout(300); }
     const actual2 = await readCurrentValue(page, ctrl);
-    if (actual2 && actual2 !== v && actual2.replace(/\s/g, '') !== v.replace(/\s/g, '')) {
-      return { ok: false, reason: `verify failed`, current: actual2 };
-    }
+    if (actual2 && actual2 !== v && actual2.replace(/\s/g, '') !== v.replace(/\s/g, ''))
+      return { ok: false, reason: 'verify failed', current: actual2 };
   }
 
   return { ...result, current: actual };
@@ -172,34 +233,38 @@ async function fillAttributes(page, product) {
   try { if ((await page.evaluate(() => document.body.innerText)).includes('一键复用')) { const no = page.locator('text=不使用').first(); if (await no.count() > 0) { await no.click(); await page.waitForTimeout(800); } } } catch {}
   await takeScreenshot(page, '06_attrs_before');
 
-  const controls = await scanControlBoxes(page);
-  const results = [];
+  const labels = await scanAllLabels(page, attrs.map(a => a.name));
+  const controls = await scanAllControls(page);
+  debugMatches(labels, controls);
 
+  const results = [];
   for (const attr of attrs) {
-    // 品牌
     if (attr.name === '品牌') { const r = await fillBrand(page, attr.value); results.push({ ...attr, ...r }); continue; }
 
-    const labelBox = await findLabelBox(page, attr.name);
-    if (!labelBox) { logger.info(`  ⚠ "${attr.name}" label not on page`); results.push({ ...attr, ok: false, reason: 'label not found', current: '' }); continue; }
+    const label = labels.find(l => l.name === attr.name);
+    if (!label) { logger.info(`  ⚠ "${attr.name}" label not on page`); results.push({ ...attr, ok: false, reason: 'no label', current: '' }); continue; }
 
-    const ctrl = matchControl(labelBox, controls);
-    if (!ctrl) { logger.info(`  ⚠ "${attr.name}" no control`); results.push({ ...attr, ok: false, reason: 'no control', current: '' }); continue; }
+    const ctrl = matchControl(label, controls);
+    if (!ctrl) {
+      logger.warn(`  ⚠ "${attr.name}" label@y=${label.cy.toFixed(0)} no matching control`);
+      await takeScreenshot(page, `06_${attr.name}_noctrl`);
+      results.push({ ...attr, ok: false, reason: 'no control', current: '' }); continue;
+    }
 
     const r = await fillOneAttr(page, attr, ctrl);
     results.push({ ...attr, ...r });
     await page.waitForTimeout(200);
   }
 
-  // 打印结果
   const okCount = results.filter(r => r.ok).length;
   const failCount = results.filter(r => !r.ok).length;
   logger.info(`Attributes: ${okCount} OK, ${failCount} FAILED (of ${attrs.length})`);
 
   if (failCount > 0) {
-    const failed = results.filter(r => !r.ok).map(r => `  ✗ ${r.name}: target=${r.value} actual=${r.current || '?'}`);
-    logger.error(`Attribute verification FAILED:\n${failed.join('\n')}`);
+    const failed = results.filter(r => !r.ok).map(r => `  ✗ ${r.name}: target=${r.value} actual=${r.current || '?'} reason=${r.reason}`);
+    logger.error(`Attribute FAILED:\n${failed.join('\n')}`);
     await takeScreenshot(page, '07_attrs_failed');
-    throw new Error(`Attribute verification failed: ${okCount}/${attrs.length} OK. Failed: ${results.filter(r => !r.ok).map(r => r.name).join(', ')}`);
+    throw new Error(`Attributes: ${okCount}/${attrs.length} OK. Failed: ${results.filter(r => !r.ok).map(r => r.name).join(', ')}`);
   }
 
   await takeScreenshot(page, '07_attrs_done');

@@ -205,9 +205,13 @@ async function fillSpecifications(page, product) {
 
   await takeScreenshot(page, '08_specs_done');
 
-  // 关闭下拉 + 等 SKU 表刷新
+  // 关闭下拉 + 等 SKU 表刷新（点击安全区域，不碰图片缩略图）
   await page.keyboard.press('Escape');
-  await page.mouse.click(200, 200);
+  // 点击规格区域标题文字（安全，不会点到缩略图）
+  try {
+    const specTitle = page.locator('text=商品规格').first();
+    if (await specTitle.count() > 0) await specTitle.click().catch(() => {});
+  } catch {}
   await page.waitForTimeout(500);
 
   const expected = product.skuRows.length;
