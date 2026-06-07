@@ -44,7 +44,10 @@ async function readBlockValues(page, block, specName) {
       // 关键：placeholder 必须匹配当前 specName（如"款式""容量"），排除其他规格
       if (ph && !ph.includes(name)) return;
       const v = (inp.value || '').trim();
-      if (v && v !== '请输入规格名称' && v !== '请输入' && v !== '请输入规格' && !vals.includes(v)) vals.push(v);
+      // 过滤黑名单（SKU表filter值 / 批量选择行）
+      const blocked = /^(全部|库存|拼单价|单买价|规格编码|启用|停用|\d)/;
+      if (!v || blocked.test(v) || v === '请输入规格名称' || v === '请输入' || v === '请输入规格') return;
+      if (!vals.includes(v)) vals.push(v);
     });
     return vals;
   }, { block, specName });
@@ -189,7 +192,7 @@ async function fillSpecifications(page, product) {
           for (let w = 0; w < 10; w++) {
             await page.waitForTimeout(300);
             const b = await findSpecBlockRoot(page, dim.name);
-            const av = b.found ? await readBlockValues(page, b) : [];
+            const av = b.found ? await readBlockValues(page, b, dim.name) : [];
             if (av.includes(value)) { committed = true; break; }
           }
         }
