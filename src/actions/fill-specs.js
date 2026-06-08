@@ -41,10 +41,10 @@ async function readBlockValues(page, block, specName) {
       // 排除非本规格的输入框：其他规格名、SKU表filter、价格输入框
       if (ph.includes('规格类型') || ph.includes('搜索')) return;
       if (ph.includes('全部') || ph.includes('库存') || ph.includes('拼单') || ph.includes('单买')) return;
-      // 关键：placeholder 必须匹配当前 specName（如"款式""容量"），排除其他规格
-      if (ph && !ph.includes(name)) return;
+      // placeholder 匹配 specName，或为通用的 "请输入规格名称"
+      const genericPh = ph.includes('请输入规格名称') || ph.includes('请输入规格');
+      if (ph && !ph.includes(name) && !genericPh) return;
       const v = (inp.value || '').trim();
-      // 过滤黑名单（SKU表filter值 / 批量选择行）
       const blocked = /^(全部|库存|拼单价|单买价|规格编码|启用|停用|\d)/;
       if (!v || blocked.test(v) || v === '请输入规格名称' || v === '请输入' || v === '请输入规格') return;
       if (!vals.includes(v)) vals.push(v);
@@ -74,7 +74,10 @@ async function fillAndCommit(page, block, value, specName) {
       const ph = (inp.placeholder || '').toLowerCase();
       if (ph.includes('规格类型') || ph.includes('搜索')) continue;
       if (ph.includes('全部') || ph.includes('库存') || ph.includes('拼单') || ph.includes('单买')) continue;
-      if (ph && !ph.includes(name.toLowerCase())) continue;
+      // 匹配：包含 specName 的 placeholder，或通用的 "请输入规格名称"
+      const matchesSpecName = ph && ph.includes(name.toLowerCase());
+      const isGenericPlaceholder = ph.includes('请输入规格名称') || ph.includes('请输入规格');
+      if (!matchesSpecName && !isGenericPlaceholder) continue;
       const cur = (inp.value || '').trim();
       const isEmpty = cur === '' || cur === '请输入' || cur === '请输入规格名称' || cur === '请输入规格';
       if (isEmpty) {
@@ -132,7 +135,8 @@ async function fillAndCommit(page, block, value, specName) {
         const box = await inputs.nth(i).boundingBox();
         if (!box || box.y < block.top || box.y > block.bottom + 500) continue;
         const ph = await inputs.nth(i).getAttribute('placeholder').catch(() => '');
-        if (!ph || !ph.includes(specName)) continue;
+        const genericPh = (ph || '').includes('请输入规格名称') || (ph || '').includes('请输入规格');
+        if (!ph || (!ph.includes(specName) && !genericPh)) continue;
         const cur = await inputs.nth(i).inputValue().catch(() => '');
         if (cur === '' || cur === '请输入规格名称') {
           await inputs.nth(i).click();
@@ -259,7 +263,7 @@ async function fillSpecifications(page, product) {
           for (const inp of inputs) {
             const ph = (inp.placeholder || '').toLowerCase();
             const v = (inp.value || '').trim();
-            if (ph && ph.includes(name.toLowerCase()) && v === target) return true;
+            if ((ph && ph.includes(name.toLowerCase())) || ph.includes('请输入规格名称') || ph.includes('请输入规格')) { if (v === target) return true; }
           }
           return false;
         }, { value, specName: dim.name });
@@ -299,7 +303,8 @@ async function fillSpecifications(page, product) {
       document.querySelectorAll('input[type="text"], input:not([type]), [data-testid="beast-core-input-htmlInput"]').forEach(inp => {
         const ph = (inp.placeholder || '').toLowerCase();
         const v = (inp.value || '').trim();
-        if (ph && ph.includes(name.toLowerCase()) && v && v !== '请输入' && v !== '请输入规格名称' && v !== '请输入规格') {
+        const matches = (ph && ph.includes(name.toLowerCase())) || ph.includes('请输入规格名称') || ph.includes('请输入规格');
+        if (matches && v && v !== '请输入' && v !== '请输入规格名称' && v !== '请输入规格') {
           if (!vals.includes(v)) vals.push(v);
         }
       });
