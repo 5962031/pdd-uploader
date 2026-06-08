@@ -12,6 +12,51 @@ async function parseProductInfo(page) {
   let skuDimensions = [];
   let skuRows = [];
 
+  // ═══════════════════════════════════════════════
+  // 辅助：滚动采集详情图
+  // ═══════════════════════════════════════════════
+  async function extractDetailImages(page, existingMainImages) {
+    const mainSet = new Set((existingMainImages || []).map(u => u.replace(/\?.*$/, '')));
+    const collected = new Set();
+    const MIN_SIZE = 200; // 最小宽高
+
+    // 先收集当前可见图片
+    let beforeCount = 0;
+    const collectVisible = async () => {
+      const urls = await page.evaluate((minSz) => {
+        const result = [];
+        const imgs = document.querySelectorAll('img[src*="pddpic"], img[src*="mms"]');
+        for (const img of imgs) {
+          const src = (img.src || '').replace(/\?.*$/, '');
+          if (!src || !src.includes('pddpic.com')) continue;
+          if (img.naturalWidth < minSz && img.naturalHeight < minSz) continue;
+          if (img.width < minSz && img.height < minSz) continue;
+          result.push(src);
+        }
+        return result;
+      }, MIN_SIZE);
+      for (const u of urls) { if (!mainSet.has(u) && !collected.has(u)) collected.add(u); }
+      return urls.length;
+    };
+
+    beforeCount = await collectVisible();
+    logger.info(`  Detail scan: before scroll=${beforeCount} visible images`);
+
+    // 滚动页面多次触发懒加载
+    for (let scroll = 0; scroll < 8; scroll++) {
+      await page.evaluate(() => window.scrollBy(0, window.innerHeight * 0.8));
+      await page.waitForTimeout(500);
+      const total = await collectVisible();
+      if (scroll % 2 === 0) {
+        logger.debug(`    scroll ${scroll + 1}: ${total} visible`);
+      }
+    }
+
+    const after = [...collected];
+    logger.info(`  Detail candidates: ${after.length}`);
+    return after.slice(0, 50);
+  }
+
   try {
     // 1. 提取标题
     title = await page.evaluate(() => {
@@ -57,21 +102,8 @@ async function parseProductInfo(page) {
     });
     logger.info(`Main images: ${mainImages.length}`);
 
-    // 3. 提取详情图（页面下方描述区域）
-    detailImages = await page.evaluate(() => {
-      const imgs = document.querySelectorAll('img[src*="pddpic"], img[src*="mms"]');
-      const urls = new Set();
-      imgs.forEach(img => {
-        const src = img.src || '';
-        if (src && src.includes('pddpic.com') && img.width > 100 && img.height > 100) {
-          urls.add(src.replace(/\?.*$/, ''));
-        }
-      });
-      return [...urls].slice(0, 50);
-    });
-    // 去重（主图里已经有的）
-    const mainSet = new Set(mainImages);
-    detailImages = detailImages.filter(u => !mainSet.has(u));
+    // 3. 提取详情图（滚动触发懒加载）
+    detailImages = await extractDetailImages(page, mainImages);
     logger.info(`Detail images: ${detailImages.length}`);
 
     // 4. 尝试提取 SKU（点击规格区域打开 SKU 面板）
