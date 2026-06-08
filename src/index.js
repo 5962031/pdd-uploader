@@ -38,6 +38,7 @@ function parseArgs() {
     dryRun: a.includes('--dry-run'),
     only: a.find(x => x.startsWith('--only='))?.split('=')[1]?.split(',').map(s => s.trim()) || null,
     from: a.find(x => x.startsWith('--from='))?.split('=')[1]?.trim() || null,
+    importUrl: a.find(x => x.startsWith('--import-url='))?.split('=').slice(1).join('=') || null,
   };
 }
 
@@ -250,6 +251,14 @@ async function main() {
   logger.info('╔═════════════════════════════════╗');
   logger.info('║  PDD Uploader v1.1.0          ║');
   logger.info('╚═════════════════════════════════╝');
+
+  // ---- 导入模式（不读 Excel） ----
+  if (args.importUrl) {
+    const { importProduct } = require('./importer/import-url');
+    const report = await importProduct(args.importUrl);
+    logger.info(`Import ${report.status}: ${report.import_id}`);
+    return;
+  }
 
   const workbook = readWorkbook(config.paths.excel);
   if (workbook.products.length === 0) throw new Error('No products in Excel');
