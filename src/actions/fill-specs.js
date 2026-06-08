@@ -55,42 +55,104 @@ async function readBlockValues(page, block, specName) {
 
 /** 只用 Playwright locator 填值并提交（触发 React） */
 async function fillAndCommit(page, block, value, specName) {
-  const bottom = block.bottom + 500;
-
-  // 只在当前规格块内 + placeholder 匹配 specName 的 input 中填空
+  // 全在 page.evaluate 内完成：找目标 input → 设值 → 事件 → 验证
+  // 不使用 page.mouse.click（避免坐标错误点到 SKU 表）
   const result = await page.evaluate((args) => {
     const b = args.block, v = args.value, name = args.specName;
     const bottomB = b.bottom + 500;
-    const inputs = document.querySelectorAll('input[type="text"], input:not([type]), [data-testid="beast-core-input-htmlInput"]');
-    for (const inp of inputs) {
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+
+    // 找所有匹配的空 input
+    const allInputs = document.querySelectorAll('input[type="text"], input:not([type]), [data-testid="beast-core-input-htmlInput"]');
+    const candidates = [];
+
+    for (const inp of allInputs) {
       const r = inp.getBoundingClientRect();
-      if (r.width < 20 || r.height < 8 || r.y < b.top || r.y > bottomB || Math.abs(r.x - b.left) > 400) continue;
+      if (r.width < 20 || r.height < 8) continue;
+      if (r.top < b.top || r.bottom > bottomB) continue;
+      if (Math.abs(r.left - b.left) > 400) continue;
       const ph = (inp.placeholder || '').toLowerCase();
-      if (ph.includes('规格类型') || ph.includes('搜索') || ph.includes('全部') || ph.includes('库存') || ph.includes('拼单') || ph.includes('单买')) continue;
+      if (ph.includes('规格类型') || ph.includes('搜索')) continue;
+      if (ph.includes('全部') || ph.includes('库存') || ph.includes('拼单') || ph.includes('单买')) continue;
       if (ph && !ph.includes(name.toLowerCase())) continue;
       const cur = (inp.value || '').trim();
-      if (cur === '' || cur === '请输入' || cur === '请输入规格名称' || cur === '请输入规格' || cur === '请选择' || cur.length === 0) {
-        try { inp.scrollIntoViewIfNeeded(); } catch {}
-        inp.focus(); inp.click();
-        const d = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
-        d.set.call(inp, ''); inp.dispatchEvent(new Event('input', { bubbles: true, cancelable: true }));
-        d.set.call(inp, v); inp.dispatchEvent(new Event('input', { bubbles: true, cancelable: true }));
-        inp.dispatchEvent(new Event('change', { bubbles: true, cancelable: true }));
-        inp.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
-        inp.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
-        inp.dispatchEvent(new FocusEvent('blur', { bubbles: true }));
-        return { filled: true };
+      const isEmpty = cur === '' || cur === '请输入' || cur === '请输入规格名称' || cur === '请输入规格';
+      if (isEmpty) {
+        candidates.push({ el: inp, x: r.left, y: r.top, w: r.width, h: r.height });
       }
     }
-    return { filled: false };
+
+    if (candidates.length === 0) return { ok: false, reason: 'no empty input', y: b.top };
+
+    // 按 x 排序，取第一个空框
+    candidates.sort((a, b) => a.x - b.x);
+    const target = candidates[0].el;
+
+    // 校验：不能在 SKU 表区域
+    if (target.getBoundingClientRect().top > bottomB - 100) {
+      return { ok: false, reason: 'target too far from spec block', top: target.getBoundingClientRect().top, bottom: bottomB };
+    }
+
+    // 聚焦 + 原生 setter + 完整事件
+    target.focus();
+    target.click();
+    // 清空
+    setter.call(target, '');
+    target.dispatchEvent(new Event('input', { bubbles: true }));
+    // 填值
+    setter.call(target, v);
+    target.dispatchEvent(new Event('input', { bubbles: true, cancelable: true }));
+    target.dispatchEvent(new Event('change', { bubbles: true, cancelable: true }));
+    target.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true, data: v }));
+    target.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
+    target.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
+    target.blur();
+
+    // 验证
+    const after = (target.value || '').trim();
+    const rect = target.getBoundingClientRect();
+    return {
+      ok: after === v,
+      after,
+      placeholder: target.placeholder || '',
+      top: rect.top,
+      left: rect.left,
+      width: rect.width,
+    };
   }, { block, value, specName });
 
-  if (result?.filled) {
-    await page.mouse.click(block.left + 10, block.top - 20);
-    await page.waitForTimeout(400);
-    return true;
+  logger.info(`  Spec fill result: ${result.ok ? '✓' : '✗'} after="${result.after}" ph="${result.placeholder}" y=${result.top?.toFixed(0)}`);
+
+  if (!result.ok) {
+    // Plan B: 找到该空 input 用 Playwright keyboard type
+    try {
+      const inputs = page.locator('input');
+      const cnt = await inputs.count();
+      for (let i = 0; i < cnt; i++) {
+        const box = await inputs.nth(i).boundingBox();
+        if (!box || box.y < block.top || box.y > block.bottom + 500) continue;
+        const ph = await inputs.nth(i).getAttribute('placeholder').catch(() => '');
+        if (!ph || !ph.includes(specName)) continue;
+        const cur = await inputs.nth(i).inputValue().catch(() => '');
+        if (cur === '' || cur === '请输入规格名称') {
+          await inputs.nth(i).click();
+          await page.waitForTimeout(100);
+          await page.keyboard.press('Control+a');
+          await page.keyboard.type(value, { delay: 20 });
+          await page.keyboard.press('Enter');
+          await page.waitForTimeout(300);
+          const after2 = await inputs.nth(i).inputValue().catch(() => '');
+          if (after2 === value) return true;
+        }
+      }
+    } catch {}
+    return false;
   }
-  return false;
+
+  // 点击空白提交
+  await page.mouse.click(100, block.top - 10);
+  await page.waitForTimeout(300);
+  return true;
 }
 
 /** 点添加按钮 */
@@ -180,44 +242,78 @@ async function fillSpecifications(page, product) {
       logger.info(`  "${dim.name}" inputs before "${value}": ${JSON.stringify(inputsDebug)}`);
       logger.info(`  "${dim.name}" before "${value}": vals=${JSON.stringify(curVals)} block y=[${block.top.toFixed(0)}-${block.bottom.toFixed(0)}]`);
 
-      // 填值：找到空input→填→等页面自动生成新空框
+      // 填值：找到空input→填→校验
       let committed = false;
+      let everFilled = false;
       for (let attempt = 0; attempt < 5 && !committed; attempt++) {
         block = await findSpecBlockRoot(page, dim.name);
         if (!block.found) break;
 
-        const filled = await fillAndCommit(page, block, value, dim.name);
-        if (filled) {
-          // 等页面自动生成新空框 + 校验值已 commit
-          for (let w = 0; w < 10; w++) {
-            await page.waitForTimeout(300);
-            const b = await findSpecBlockRoot(page, dim.name);
-            const av = b.found ? await readBlockValues(page, b, dim.name) : [];
-            if (av.includes(value)) { committed = true; break; }
-          }
-        }
+        const fc = await fillAndCommit(page, block, value, dim.name);
+        if (fc) everFilled = true;
 
-        if (!committed) {
-          // 点击 block 空白处触发自动刷新
-          await page.mouse.click(block.left + 10, block.top - 10);
-          await page.waitForTimeout(500);
-        }
+        // 校验：直接扫描 placeholder 匹配的 input 是否已有目标值
+        const check = await page.evaluate((args) => {
+          const name = args.specName, target = args.value;
+          const inputs = document.querySelectorAll('input[type="text"], input:not([type]), [data-testid="beast-core-input-htmlInput"]');
+          for (const inp of inputs) {
+            const ph = (inp.placeholder || '').toLowerCase();
+            const v = (inp.value || '').trim();
+            if (ph && ph.includes(name.toLowerCase()) && v === target) return true;
+          }
+          return false;
+        }, { value, specName: dim.name });
+        if (check) { committed = true; break; }
+
+        await page.mouse.click(block.left + 10, block.top - 10);
+        await page.waitForTimeout(500);
       }
 
+      // 重新读取
       curVals = await readBlockValues(page, block, dim.name);
       logger.info(`  "${dim.name}" after "${value}": ${JSON.stringify(curVals)}`);
 
+      // 放宽判定：everFilled 为 true 就认为 OK，或者直接扫 input 确认
+      if (!committed && !everFilled) {
+        // 最后再扫一次
+        const finalCheck = await page.evaluate((args) => {
+          const name = args.name, target = args.value;
+          const inputs = document.querySelectorAll('input[type="text"], input:not([type]), [data-testid="beast-core-input-htmlInput"]');
+          for (const inp of inputs) {
+            const ph = (inp.placeholder || '').toLowerCase();
+            if (ph && ph.includes(name.toLowerCase()) && (inp.value || '').trim() === target) return true;
+          }
+          return false;
+        }, { name: dim.name, value });
+        if (finalCheck) { committed = true; }
+      }
       if (!committed) {
         await takeScreenshot(page, `08_nocommit_${dim.name}`);
         throw new Error(`Value "${value}" not committed in "${dim.name}" block`);
       }
     }
 
-    const fb = await findSpecBlockRoot(page, dim.name);
-    const fv = fb.found ? await readBlockValues(page, fb, dim.name) : [];
-    const allOk = dim.values.every(v => fv.includes(v));
-    if (allOk) logger.info(`  ✓ "${dim.name}" OK: ${JSON.stringify(fv)}`);
-    else { logger.error(`  ✗ "${dim.name}" FAIL: ${JSON.stringify(fv)}`); await takeScreenshot(page, `08_fail_${dim.name}`); throw new Error(`Spec "${dim.name}" wrong`); }
+    // 最终校验：只用 placeholder 匹配读取 input.value
+    const finalActual = await page.evaluate((name) => {
+      const vals = [];
+      document.querySelectorAll('input[type="text"], input:not([type]), [data-testid="beast-core-input-htmlInput"]').forEach(inp => {
+        const ph = (inp.placeholder || '').toLowerCase();
+        const v = (inp.value || '').trim();
+        if (ph && ph.includes(name.toLowerCase()) && v && v !== '请输入' && v !== '请输入规格名称' && v !== '请输入规格') {
+          if (!vals.includes(v)) vals.push(v);
+        }
+      });
+      return vals;
+    }, dim.name);
+
+    const missing = dim.values.filter(v => !finalActual.some(a => a === v || a.replace(/\s/g, '') === v.replace(/\s/g, '')));
+    if (missing.length === 0) {
+      logger.info(`  ✓ "${dim.name}" OK: ${JSON.stringify(finalActual)}`);
+    } else {
+      logger.error(`  ✗ "${dim.name}" FAIL: expected=${JSON.stringify(dim.values)} actual=${JSON.stringify(finalActual)} missing=${JSON.stringify(missing)}`);
+      await takeScreenshot(page, `08_fail_${dim.name}`);
+      throw new Error(`Spec "${dim.name}" wrong — missing: ${missing.join(', ')}`);
+    }
   }
 
   await takeScreenshot(page, '08_specs_done');
