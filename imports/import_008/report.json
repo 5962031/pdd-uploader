@@ -1,0 +1,29 @@
+{
+  "import_id": "import_008",
+  "source_url": "https://mobile.pinduoduo.com/goods.html?goods_id=960546788300",
+  "started_at": "2026-06-09T04:28:40.356Z",
+  "status": "success",
+  "title": "外卖封口贴定制美团外卖贴纸食品安全封签餐饮店商用防拆自粘封条",
+  "main_images": 4,
+  "detail_images": 7,
+  "sku_dimensions": [
+    {
+      "name": "颜色",
+      "values": [
+        "1000张起定制/免费设计排版",
+        "可定制",
+        "【红色】8*2cm*1000张*1卷",
+        "【红色】8*2cm*1000张*3卷",
+        "【红色】8*2cm*1000张*5卷",
+        "已拼547件"
+      ]
+    }
+  ],
+  "sku_rows": 6,
+  "warnings": [],
+  "errors": [],
+  "main_images_downloaded": 4,
+  "detail_images_downloaded": 7,
+  "sku_images_downloaded": 0,
+  "finished_at": "2026-06-09T04:29:09.315Z"
+}

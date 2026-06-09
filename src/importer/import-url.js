@@ -87,6 +87,7 @@ async function importProduct(productUrl) {
       detail_images: parsed.detailImages || [],
       sku_dimensions: parsed.skuDimensions || [],
       sku_rows: parsed.skuRows || [],
+      sku_images: parsed.skuImages || [],
       warnings: parsed.warnings || [],
     };
     fs.writeFileSync(path.join(importsDir, 'raw.json'), JSON.stringify(rawData, null, 2));
@@ -99,6 +100,7 @@ async function importProduct(productUrl) {
       title: parsed?.title || '',
       skuDimensions: parsed?.skuDimensions || [],
       skuRows: parsed?.skuRows || [],
+      skuImages: parsed?.skuImages || [],
     };
 
     // 4. 下载图片

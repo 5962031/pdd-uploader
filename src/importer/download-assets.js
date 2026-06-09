@@ -53,6 +53,22 @@ async function downloadAssets(parsed, assetsDir) {
   }
   logger.info(`  Detail: ${detail}/${parsed.detailImages.length}`);
 
+  // SKU图 → SKU图/
+  const skuDir = path.join(assetsDir, 'SKU图');
+  const skuImages = parsed.skuImages || [];
+  if (skuImages.length > 0) {
+    logger.info(`  SKU images: ${skuImages.length} candidates`);
+    for (let i = 0; i < skuImages.length; i++) {
+      const url = skuImages[i];
+      const ext = url.match(/\.(jpe?g|png|webp|gif)/i)?.[1] || 'jpg';
+      const dest = path.join(skuDir, `sku_${String(i + 1).padStart(3, '0')}.${ext}`);
+      const ok = await downloadFile(url, dest);
+      if (ok) sku++;
+      else logger.warn(`  SKU Failed: ${url.substring(0, 60)}...`);
+    }
+    logger.info(`  SKU: ${sku}/${skuImages.length}`);
+  }
+
   return { main, detail, sku };
 }
 

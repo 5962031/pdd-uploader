@@ -1,0 +1,19 @@
+{
+  "import_id": "import_003",
+  "source_url": "https://mobile.pinduoduo.com/goods.html?goods_id=960546788300",
+  "started_at": "2026-06-08T07:08:52.419Z",
+  "status": "success",
+  "title": "外卖封口贴定制美团外卖贴纸食品安全封签餐饮店商用防拆自粘封条",
+  "main_images": 5,
+  "detail_images": 8,
+  "sku_dimensions": [],
+  "sku_rows": 0,
+  "warnings": [
+    "SKU_NOT_FOUND"
+  ],
+  "errors": [],
+  "main_images_downloaded": 5,
+  "detail_images_downloaded": 8,
+  "sku_images_downloaded": 0,
+  "finished_at": "2026-06-08T07:09:07.237Z"
+}
