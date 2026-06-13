@@ -1,6 +1,6 @@
-# pdd-uploader
+# my test ❌❌❌
 
-拼多多商家后台商品发布自动化工具。从 Excel 读取商品数据，用 Playwright 驱动浏览器自动填写发布表单，停在提交前等待人工确认。
+mytest工具。从 Excel 读取商品数据，用 Playwright 驱动浏览器自动填写发布表单，停在提交前等待人工确认。
 
 ## 环境要求
 
